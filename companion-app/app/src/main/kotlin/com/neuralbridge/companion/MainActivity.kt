@@ -65,29 +65,37 @@ class MainActivity : Activity() {
         val scrollView = ScrollView(this)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            val padding = resources.getDimensionPixelSize(R.dimen.screen_padding_horizontal)
+            setPadding(padding, padding, padding, padding)
+            setBackgroundResource(R.drawable.bg_wave_pattern)
         }
 
         // App title
-        layout.addView(createTextView("NeuralBridge", 28f, true).apply {
-            setPadding(0, 0, 0, 16)
+        layout.addView(createTextView("NeuralBridge", R.style.TextAppearance_NeuralBridge_HeadlineLarge, true).apply {
+            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_medium)
+            setPadding(0, 0, 0, paddingBottom)
+            setTextColor(getColor(R.color.wave_blue))
         })
 
         // Progress indicator
-        progressText = createTextView("Checking permissions...", 14f, false).apply {
-            setPadding(0, 0, 0, 8)
+        progressText = createTextView("Checking permissions...", R.style.TextAppearance_NeuralBridge_BodyMedium, false).apply {
+            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_small)
+            setPadding(0, 0, 0, paddingBottom)
         }
         layout.addView(progressText)
 
         // Overall status
-        overallStatusText = createTextView("", 18f, true).apply {
-            setPadding(0, 0, 0, 24)
+        overallStatusText = createTextView("", R.style.TextAppearance_NeuralBridge_TitleLarge, true).apply {
+            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_large)
+            setPadding(0, 0, 0, paddingBottom)
         }
         layout.addView(overallStatusText)
 
         // Section: Required Permissions
-        layout.addView(createTextView("REQUIRED PERMISSIONS", 16f, true).apply {
-            setPadding(0, 0, 0, 12)
+        layout.addView(createTextView("REQUIRED PERMISSIONS", R.style.TextAppearance_NeuralBridge_TitleMedium, true).apply {
+            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_medium)
+            setPadding(0, 0, 0, paddingBottom)
+            setTextColor(getColor(R.color.wave_purple))
         })
 
         // 1. AccessibilityService
@@ -125,33 +133,43 @@ class MainActivity : Activity() {
         }
 
         // Section: Service Status
-        layout.addView(createTextView("SERVICE STATUS", 16f, true).apply {
-            setPadding(0, 24, 0, 12)
+        layout.addView(createTextView("SERVICE STATUS", R.style.TextAppearance_NeuralBridge_TitleMedium, true).apply {
+            val paddingTop = resources.getDimensionPixelSize(R.dimen.spacing_large)
+            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_medium)
+            setPadding(0, paddingTop, 0, paddingBottom)
+            setTextColor(getColor(R.color.wave_purple))
         })
 
-        serviceStatusText = createTextView("", 14f, false).apply {
-            setPadding(0, 0, 0, 8)
+        serviceStatusText = createTextView("", R.style.TextAppearance_NeuralBridge_BodyMedium, false).apply {
+            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_small)
+            setPadding(0, 0, 0, paddingBottom)
         }
         layout.addView(serviceStatusText)
 
-        connectionInfoText = createTextView("", 14f, false).apply {
-            setPadding(0, 0, 0, 16)
+        connectionInfoText = createTextView("", R.style.TextAppearance_NeuralBridge_BodyMedium, false).apply {
+            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_medium)
+            setPadding(0, 0, 0, paddingBottom)
         }
         layout.addView(connectionInfoText)
 
         // ADB Setup Instructions
-        layout.addView(createTextView("ADB SETUP", 16f, true).apply {
-            setPadding(0, 8, 0, 12)
+        layout.addView(createTextView("ADB SETUP", R.style.TextAppearance_NeuralBridge_TitleMedium, true).apply {
+            val paddingTop = resources.getDimensionPixelSize(R.dimen.spacing_small)
+            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_medium)
+            setPadding(0, paddingTop, 0, paddingBottom)
+            setTextColor(getColor(R.color.wave_purple))
         })
 
         layout.addView(createTextView(
             "$ adb forward tcp:38472 tcp:38472\n$ cargo run --release -- --auto-discover",
-            12f,
+            R.style.TextAppearance_NeuralBridge_BodySmall,
             false
         ).apply {
-            setPadding(16, 8, 16, 8)
-            setBackgroundColor(0xFF2A2A2A.toInt())
-            setTextColor(0xFF00FF00.toInt())
+            val padding = resources.getDimensionPixelSize(R.dimen.spacing_medium)
+            val paddingVert = resources.getDimensionPixelSize(R.dimen.spacing_small)
+            setPadding(padding, paddingVert, padding, paddingVert)
+            setBackgroundColor(getColor(R.color.md_theme_dark_surface))
+            setTextColor(getColor(R.color.success))
             typeface = android.graphics.Typeface.MONOSPACE
         })
 
@@ -163,15 +181,20 @@ class MainActivity : Activity() {
      * Create a permission view with status indicator and action button
      */
     private fun createPermissionView(title: String, description: String): PermissionView {
+        val cardPadding = resources.getDimensionPixelSize(R.dimen.card_padding)
+        val spacingSmall = resources.getDimensionPixelSize(R.dimen.spacing_small)
+        val spacingMedium = resources.getDimensionPixelSize(R.dimen.spacing_medium)
+
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(16, 12, 16, 12)
-            setBackgroundColor(0xFFF5F5F5.toInt())
+            setPadding(cardPadding, cardPadding, cardPadding, cardPadding)
+            setBackgroundResource(R.drawable.bg_card_wave)
+            elevation = resources.getDimension(R.dimen.elevation_card)
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-            params.setMargins(0, 0, 0, 8)
+            params.setMargins(0, 0, 0, spacingSmall)
             layoutParams = params
         }
 
@@ -183,15 +206,14 @@ class MainActivity : Activity() {
 
         val statusIndicator = TextView(this).apply {
             text = "⚠"
-            textSize = 18f
-            setPadding(0, 0, 12, 0)
+            setTextAppearance(R.style.TextAppearance_NeuralBridge_TitleMedium)
+            setPadding(0, 0, spacingMedium, 0)
         }
         titleRow.addView(statusIndicator)
 
         val titleText = TextView(this).apply {
             text = title
-            textSize = 16f
-            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextAppearance(R.style.TextAppearance_NeuralBridge_TitleMedium)
         }
         titleRow.addView(titleText)
 
@@ -200,17 +222,21 @@ class MainActivity : Activity() {
         // Description
         val descriptionText = TextView(this).apply {
             text = description
-            textSize = 12f
-            setPadding(30, 4, 0, 8)
-            setTextColor(0xFF666666.toInt())
+            setTextAppearance(R.style.TextAppearance_NeuralBridge_BodySmall)
+            setPadding(30, 4, 0, spacingSmall)
+            setTextColor(getColor(R.color.text_medium_emphasis))
         }
         container.addView(descriptionText)
 
         // Action button
         val actionButton = Button(this).apply {
             text = "GRANT"
-            textSize = 12f
-            setPadding(24, 8, 24, 8)
+            setTextAppearance(R.style.TextAppearance_NeuralBridge_LabelLarge)
+            setBackgroundResource(R.drawable.btn_wave_primary)
+            val buttonPadding = resources.getDimensionPixelSize(R.dimen.spacing_large)
+            val buttonPaddingVert = resources.getDimensionPixelSize(R.dimen.spacing_small)
+            setPadding(buttonPadding, buttonPaddingVert, buttonPadding, buttonPaddingVert)
+            minimumHeight = resources.getDimensionPixelSize(R.dimen.button_height_default)
         }
         container.addView(actionButton)
 
@@ -218,12 +244,12 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Create a styled TextView
+     * Create a styled TextView with theme support
      */
-    private fun createTextView(text: String, size: Float, bold: Boolean): TextView {
+    private fun createTextView(text: String, styleRes: Int, bold: Boolean): TextView {
         return TextView(this).apply {
             this.text = text
-            textSize = size
+            setTextAppearance(styleRes)
             if (bold) setTypeface(null, android.graphics.Typeface.BOLD)
         }
     }
@@ -339,23 +365,23 @@ class MainActivity : Activity() {
         val allGranted = (granted == total)
         if (allGranted) {
             overallStatusText.text = "✓ ALL SYSTEMS READY"
-            overallStatusText.setTextColor(0xFF00AA00.toInt())
+            overallStatusText.setTextColor(getColor(R.color.success))
         } else {
             overallStatusText.text = "⚠ SETUP INCOMPLETE"
-            overallStatusText.setTextColor(0xFFCC6600.toInt())
+            overallStatusText.setTextColor(getColor(R.color.warning))
         }
 
         // Update service status
         val service = com.neuralbridge.companion.service.NeuralBridgeAccessibilityService.instance
         if (service != null) {
             serviceStatusText.text = "🟢 AccessibilityService running\n🟢 TCP Server on port 38472\n🟢 Foreground Service active"
-            serviceStatusText.setTextColor(0xFF00AA00.toInt())
+            serviceStatusText.setTextColor(getColor(R.color.success))
 
             // TODO: Get actual connection count from TcpServer
             connectionInfoText.text = "📡 Ready for connections"
         } else {
             serviceStatusText.text = "🔴 AccessibilityService not running"
-            serviceStatusText.setTextColor(0xFFCC0000.toInt())
+            serviceStatusText.setTextColor(getColor(R.color.status_error))
             connectionInfoText.text = ""
         }
     }
@@ -374,13 +400,13 @@ class MainActivity : Activity() {
 
         if (granted) {
             view.statusIndicator.text = "✓"
-            view.statusIndicator.setTextColor(0xFF00AA00.toInt())
+            view.statusIndicator.setTextColor(getColor(R.color.success))
             view.actionButton.text = grantedText
             view.actionButton.isEnabled = false
             view.actionButton.alpha = 0.5f
         } else {
             view.statusIndicator.text = "✗"
-            view.statusIndicator.setTextColor(0xFFCC0000.toInt())
+            view.statusIndicator.setTextColor(getColor(R.color.status_error))
             view.actionButton.text = notGrantedText
             view.actionButton.isEnabled = true
             view.actionButton.alpha = 1.0f

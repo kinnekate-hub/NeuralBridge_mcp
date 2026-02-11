@@ -402,6 +402,71 @@ fun executeNewGesture(params: Params) {
 - `companion-app/.../uitree/UiTreeWalker.kt` - Semantic extraction algorithm
 - `companion-app/.../gesture/GestureEngine.kt` - All gesture implementations
 
+## Wave Bridge Design System
+
+The companion app uses the **Wave Bridge design system**, a comprehensive Material Design 3 implementation with wave-inspired aesthetics.
+
+### Design Resources
+
+All design system resources are located in `companion-app/design/`:
+
+- **`DESIGN_SYSTEM.md`** - Complete design system specification
+  - Color palette (Wave Blue #5E72E4, Wave Purple #825EE4)
+  - Typography scale (Material Design 3)
+  - Spacing system (8dp grid)
+  - Component patterns and styles
+  - Light and dark theme specifications
+
+- **`DEVELOPER_GUIDE.md`** - Developer implementation guide
+  - How to use theme attributes in layouts
+  - Code examples for all components
+  - Common patterns and anti-patterns
+  - Migration guide for existing code
+  - Testing checklist
+
+- **`ICON_RESOURCES.md`** - Icon generation and usage
+  - App icon specifications (all densities)
+  - Adaptive icon implementation
+  - Icon generation scripts
+
+- **`icon-showcase.html`** - Visual design preview
+  - Interactive icon showcase
+  - Design system component preview
+  - Color palette visualization
+
+### Implementation Files
+
+Theme resources are in `companion-app/app/src/main/res/values/`:
+
+- **`colors.xml`** - Full Material Design 3 color palette (light + dark themes)
+- **`themes.xml`** - Theme.NeuralBridge and Theme.NeuralBridge.Dark
+- **`styles.xml`** - Complete component style hierarchy (buttons, cards, text fields, etc.)
+- **`dimens.xml`** - Spacing system, corner radii (24dp+), elevations
+
+### Design Principles
+
+1. **Fluid Motion** - Wave-inspired curves with generous corner radii (24dp minimum for cards)
+2. **Blue-Purple Gradient** - Signature visual element flowing from #5E72E4 → #825EE4
+3. **8dp Grid System** - Consistent spacing (4dp, 8dp, 16dp, 24dp, 32dp, 48dp, 64dp)
+4. **Material Design 3** - Full MD3 implementation with dynamic color support
+5. **Accessibility First** - WCAG AA contrast ratios, 48dp touch targets
+
+### Usage Guidelines
+
+**When developing UI:**
+- ALWAYS use theme attributes (`?attr/colorPrimary`) not direct colors (`@color/wave_blue`)
+- ALWAYS use text appearances (`@style/TextAppearance.NeuralBridge.BodyLarge`) not raw text sizes
+- ALWAYS use spacing dimensions (`@dimen/spacing_medium`) not arbitrary values
+- ALWAYS use component styles (`@style/Widget.NeuralBridge.Button`) for consistency
+- Test both light and dark themes
+- Verify 48dp minimum touch targets for interactive elements
+
+**For new components:**
+- Reference `DEVELOPER_GUIDE.md` for code examples
+- Use wave-inspired corner radii (16dp for buttons, 24dp for cards)
+- Apply proper elevation (cards: 2dp, FAB: 6dp, dialogs: 24dp)
+- Follow Material Design 3 component guidelines
+
 ## Notes
 
 - **Performance is critical:** Every millisecond matters. Profile before optimizing, but be conscious of latency in all design decisions.
