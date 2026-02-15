@@ -19,7 +19,7 @@ async def test_connection():
 
     # Connect to MCP server
     mcp_server_path = Path(__file__).parent.parent / "mcp-server/target/release/neuralbridge-mcp"
-    device_id = "emulator-5554"
+    device_id = "344656504e303098"
 
     console.print(f"MCP Server: {mcp_server_path}")
     console.print(f"Device: {device_id}\n")

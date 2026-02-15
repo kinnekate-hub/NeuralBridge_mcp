@@ -30,7 +30,15 @@ impl AdbExecutor {
 
     /// Find ADB binary
     fn find_adb() -> Result<PathBuf> {
-        // Try PATH first
+        // Try ADB_PATH env var first (explicit path to adb binary)
+        if let Ok(adb_path) = std::env::var("ADB_PATH") {
+            let path = PathBuf::from(&adb_path);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        // Try PATH
         if let Ok(output) = std::process::Command::new("which")
             .arg("adb")
             .output()
@@ -266,6 +274,141 @@ impl AdbExecutor {
         ]).await?;
 
         Ok(())
+    }
+
+    /// Capture logcat output for debugging
+    pub async fn capture_logcat(
+        &self,
+        device_id: &str,
+        package: Option<&str>,
+        level: &str,
+        lines: i32,
+        crash_only: bool,
+    ) -> Result<String> {
+        debug!("Capturing logcat from device {}", device_id);
+
+        let mut output = if let Some(pkg) = package {
+            // Get PID for the package
+            let pid_output = self.execute_command(&[
+                "-s", device_id,
+                "shell", "pidof", pkg
+            ]).await;
+
+            match pid_output {
+                Ok(pid_str) => {
+                    let pid = pid_str.trim();
+                    if pid.is_empty() {
+                        // Package not running, return empty
+                        return Ok(String::new());
+                    }
+                    // Get logcat for this PID
+                    self.execute_command(&[
+                        "-s", device_id,
+                        "logcat", "-d", &format!("--pid={}", pid),
+                        "-t", &lines.to_string(),
+                        &format!("*:{}", level)
+                    ]).await?
+                }
+                Err(_) => {
+                    // pidof failed, package not running
+                    return Ok(String::new());
+                }
+            }
+        } else {
+            // No package filter, get all logs
+            self.execute_command(&[
+                "-s", device_id,
+                "logcat", "-d",
+                "-t", &lines.to_string(),
+                &format!("*:{}", level)
+            ]).await?
+        };
+
+        // If crash_only, filter for FATAL EXCEPTION blocks
+        if crash_only {
+            let mut crash_lines = Vec::new();
+            let mut in_crash = false;
+
+            for line in output.lines() {
+                if line.contains("FATAL EXCEPTION") {
+                    in_crash = true;
+                    crash_lines.push(line.to_string());
+                } else if in_crash {
+                    if line.trim().is_empty() {
+                        in_crash = false;
+                    } else {
+                        crash_lines.push(line.to_string());
+                    }
+                }
+            }
+            output = crash_lines.join("\n");
+        }
+
+        Ok(output)
+    }
+
+    /// Get device information
+    pub async fn get_device_info(&self, device_id: &str) -> Result<serde_json::Value> {
+        debug!("Getting device info from device {}", device_id);
+
+        // Get various device properties
+        let manufacturer = self.execute_command(&[
+            "-s", device_id,
+            "shell", "getprop", "ro.product.manufacturer"
+        ]).await?.trim().to_string();
+
+        let model = self.execute_command(&[
+            "-s", device_id,
+            "shell", "getprop", "ro.product.model"
+        ]).await?.trim().to_string();
+
+        let android_version = self.execute_command(&[
+            "-s", device_id,
+            "shell", "getprop", "ro.build.version.release"
+        ]).await?.trim().to_string();
+
+        let sdk_level = self.execute_command(&[
+            "-s", device_id,
+            "shell", "getprop", "ro.build.version.sdk"
+        ]).await?.trim().to_string();
+
+        // Get screen dimensions
+        let wm_size = self.execute_command(&[
+            "-s", device_id,
+            "shell", "wm", "size"
+        ]).await?;
+
+        // Parse "Physical size: 1080x2340" or "Override size: 1080x2340"
+        let dimensions = wm_size
+            .lines()
+            .find(|line| line.contains("size:"))
+            .and_then(|line| line.split(':').nth(1))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Get screen density
+        let wm_density = self.execute_command(&[
+            "-s", device_id,
+            "shell", "wm", "density"
+        ]).await?;
+
+        // Parse "Physical density: 420" or "Override density: 420"
+        let density = wm_density
+            .lines()
+            .find(|line| line.contains("density:"))
+            .and_then(|line| line.split(':').nth(1))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Build JSON response
+        Ok(serde_json::json!({
+            "manufacturer": manufacturer,
+            "model": model,
+            "android_version": android_version,
+            "sdk_level": sdk_level,
+            "screen_size": dimensions,
+            "screen_density": density,
+        }))
     }
 }
 

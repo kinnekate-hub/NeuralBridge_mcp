@@ -235,7 +235,8 @@ impl DeviceManager {
             "shell", "settings", "get", "secure", "enabled_accessibility_services"
         ]).await?;
 
-        Ok(output.contains("com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService"))
+        Ok(output.contains("com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService")
+            || output.contains("com.neuralbridge.companion/com.neuralbridge.companion.service.NeuralBridgeAccessibilityService"))
     }
 
     /// Get device information
@@ -266,7 +267,8 @@ impl DeviceManager {
             "shell", "settings", "get", "secure", "enabled_notification_listeners"
         ]).await?;
 
-        Ok(output.contains("com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"))
+        Ok(output.contains("com.neuralbridge.companion/com.neuralbridge.companion.notification.NotificationListener")
+            || output.contains("com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"))
     }
 
     /// Check all permissions required for companion app
@@ -357,7 +359,7 @@ impl DeviceManager {
 
         info!("Enabling NotificationListenerService on {}", device_id);
 
-        let service_component = "com.neuralbridge.companion/.service.NeuralBridgeNotificationListener";
+        let service_component = "com.neuralbridge.companion/com.neuralbridge.companion.notification.NotificationListener";
 
         // Use cmd notification allow_listener
         self.adb.execute_command(&[

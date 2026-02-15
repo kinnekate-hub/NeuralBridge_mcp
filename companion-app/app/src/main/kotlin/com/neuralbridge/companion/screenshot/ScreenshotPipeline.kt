@@ -158,7 +158,7 @@ class ScreenshotPipeline(
                 } catch (e: Exception) {
                     continuation.resumeWithException(e)
                 }
-            }, null)
+            }, android.os.Handler(android.os.Looper.getMainLooper()))
 
             // Handle cancellation
             continuation.invokeOnCancellation {
@@ -227,7 +227,7 @@ class ScreenshotPipeline(
                         if (result != null) {
                             val (resultCode, resultData) = result
 
-                            if (resultCode == Activity.RESULT_OK) {
+                            if (resultCode == Activity.RESULT_OK && resultData != null) {
                                 try {
                                     // Step 3: Create MediaProjection from consent result
                                     val mediaProjectionManager = accessibilityService.getSystemService(

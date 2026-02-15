@@ -342,22 +342,26 @@ private class ClientConnection(
      * Send message to client
      */
     private fun sendMessage(type: Byte, payload: ByteArray) {
-        synchronized(outputStream) {
-            // Build header
-            val header = ByteBuffer.allocate(HEADER_SIZE).apply {
-                order(ByteOrder.BIG_ENDIAN)
-                putShort(MAGIC)
-                put(type)
-                putInt(payload.size)
-            }.array()
+        // Combine header + payload into a SINGLE byte array for atomic write
+        val combined = ByteArray(HEADER_SIZE + payload.size)
 
-            // Send header + payload
-            outputStream.write(header)
-            outputStream.write(payload)
+        // Build header directly into combined array
+        ByteBuffer.wrap(combined, 0, HEADER_SIZE).apply {
+            order(ByteOrder.BIG_ENDIAN)
+            putShort(MAGIC)
+            put(type)
+            putInt(payload.size)
+        }
+
+        // Copy payload
+        System.arraycopy(payload, 0, combined, HEADER_SIZE, payload.size)
+
+        synchronized(outputStream) {
+            outputStream.write(combined)
             outputStream.flush()
         }
 
-        Log.d(TAG, "Sent message: type=0x${type.toString(16)}, payload=${payload.size} bytes")
+        Log.d(TAG, "Sent message: type=0x${type.toString(16)}, payload=${payload.size} bytes, total=${combined.size} bytes")
     }
 
     /**

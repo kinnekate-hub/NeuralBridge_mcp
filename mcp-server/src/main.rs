@@ -6,6 +6,7 @@
  */
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use rmcp::{
     ErrorData as McpError,
     ServerHandler,
@@ -316,6 +317,15 @@ impl AppState {
         Ok(())
     }
 
+    /// Clear the cached connection (called on send failures to force reconnect)
+    pub async fn clear_connection(&self) {
+        let mut conn_write = self.connection.write().await;
+        if conn_write.is_some() {
+            info!("Clearing cached connection (will reconnect on next use)");
+            *conn_write = None;
+        }
+    }
+
     pub async fn get_connection(&self) -> Result<DeviceConnection> {
         // Check if we have an existing connection
         let conn = self.connection.read().await;
@@ -327,6 +337,9 @@ impl AppState {
             info!("Existing connection is dead, reconnecting...");
         }
         drop(conn);
+
+        // Clear the dead connection
+        self.clear_connection().await;
 
         // Get device ID
         let device_id = self.device_id.read().await;
@@ -373,6 +386,34 @@ impl AppState {
 
         info!("Connection established successfully");
         Ok(new_conn)
+    }
+
+    /// Send a request with automatic connection recovery.
+    /// If the send fails due to a dead connection, clears the cached connection
+    /// and retries once with a fresh connection.
+    pub async fn send_with_recovery(&self, request: Request) -> Result<pb::Response> {
+        // Try with existing connection
+        let conn = self.get_connection().await?;
+        match conn.send_request(request.clone()).await {
+            Ok(response) => Ok(response),
+            Err(e) => {
+                let error_msg = e.to_string().to_lowercase();
+                if error_msg.contains("send")
+                    || error_msg.contains("write")
+                    || error_msg.contains("broken pipe")
+                    || error_msg.contains("connection reset")
+                    || error_msg.contains("connection closed")
+                {
+                    warn!("Send failed ({}), clearing connection and retrying...", e);
+                    self.clear_connection().await;
+                    // Retry with fresh connection
+                    let new_conn = self.get_connection().await?;
+                    new_conn.send_request(request).await
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     pub fn device_manager(&self) -> &Arc<DeviceManager> {
@@ -598,6 +639,72 @@ pub struct WaitForElementParams {
 pub struct WaitForIdleParams {
     /// Timeout in milliseconds (default: 5000)
     pub timeout_ms: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ClearAppDataParams {
+    /// App package name to clear data for
+    pub package_name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct WaitForGoneParams {
+    /// Element text to wait to disappear
+    pub text: Option<String>,
+    /// Element resource ID
+    pub resource_id: Option<String>,
+    /// Element content description
+    pub content_desc: Option<String>,
+    /// Timeout in milliseconds (default: 5000)
+    pub timeout_ms: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ScrollToElementParams {
+    /// Element text to scroll to
+    pub text: Option<String>,
+    /// Element resource ID
+    pub resource_id: Option<String>,
+    /// Element content description
+    pub content_desc: Option<String>,
+    /// Scroll direction: "up", "down", "left", "right" (default: "up" scrolls content down)
+    pub direction: Option<String>,
+    /// Maximum number of scrolls to attempt (default: 20)
+    pub max_scrolls: Option<i32>,
+    /// Total timeout in milliseconds (default: 30000)
+    pub timeout_ms: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GetScreenContextParams {
+    /// Include all elements (true) or only interactive/text elements (false, default)
+    pub include_all_elements: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CaptureLogcatParams {
+    /// Filter by package name
+    pub package: Option<String>,
+    /// Log level: "V", "D", "I", "W", "E", "F" (default: "W")
+    pub level: Option<String>,
+    /// Number of lines to return (default: 100)
+    pub lines: Option<i32>,
+    /// Return only crash reports (FATAL EXCEPTION blocks)
+    pub crash_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ScreenshotDiffParams {
+    /// Reference screenshot as base64-encoded JPEG
+    pub reference_base64: String,
+    /// Similarity threshold (0.0-1.0, default: 0.95)
+    pub threshold: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GetRecentToastsParams {
+    /// Only return toasts from the last N milliseconds (default: 5000)
+    pub since_ms: Option<i64>,
 }
 
 // ============================================================================
@@ -979,6 +1086,172 @@ impl NeuralBridgeServer {
             "activity_name": app_info.activity_name,
             "is_launcher": app_info.is_launcher,
             "latency_ms": response.latency_ms,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    #[tool(
+        name = "android_get_device_info",
+        description = "Get device information including manufacturer, model, Android version, SDK level, and screen dimensions."
+    )]
+    async fn android_get_device_info(&self) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_get_device_info");
+
+        // Get device ID
+        let device_id = self.state.device_id.read().await;
+        let device_id_str = device_id.as_ref()
+            .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected")))?;
+
+        // Get device info via ADB
+        let adb = self.state.device_manager().adb();
+        let device_info = adb.get_device_info(device_id_str).await
+            .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to get device info: {}", e)))?;
+
+        // Return the device info JSON
+        Ok(CallToolResult::success(vec![Content::text(device_info.to_string())]))
+    }
+
+    #[tool(
+        name = "android_get_screen_context",
+        description = "Get a comprehensive snapshot of the current screen for AI analysis. Returns foreground app info, simplified UI tree (interactive elements and text), and a thumbnail screenshot in a single efficient call."
+    )]
+    async fn android_get_screen_context(
+        &self,
+        Parameters(params): Parameters<GetScreenContextParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_get_screen_context");
+
+        let include_all = params.include_all_elements.unwrap_or(false);
+
+        // Get connection
+        let conn = self.state.get_connection().await
+            .map_err(to_mcp_error)?;
+
+        // Step 1: Get foreground app info
+        let app_request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::GetForegroundApp(pb::GetForegroundAppRequest {})),
+        };
+
+        let app_response = conn.send_request(app_request).await
+            .map_err(to_mcp_error)?;
+
+        let app_info = match app_response.result {
+            Some(pb::response::Result::AppInfo(info)) => info,
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Failed to get foreground app info".to_string()
+                )]));
+            }
+        };
+
+        // Step 2: Get UI tree (visible elements only)
+        let tree_request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::GetUiTree(pb::GetUiTreeRequest {
+                include_invisible: false,
+                include_webview: false,
+                max_depth: 0,
+            })),
+        };
+
+        let tree_response = conn.send_request(tree_request).await
+            .map_err(to_mcp_error)?;
+
+        let ui_tree = match tree_response.result {
+            Some(pb::response::Result::UiTree(tree)) => tree,
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Failed to get UI tree".to_string()
+                )]));
+            }
+        };
+
+        // Step 3: Get thumbnail screenshot
+        let screenshot_request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::Screenshot(pb::ScreenshotRequest {
+                quality: pb::ScreenshotQuality::Thumbnail as i32,
+                use_adb_fallback: false,
+            })),
+        };
+
+        let screenshot_response = conn.send_request(screenshot_request).await
+            .map_err(to_mcp_error)?;
+
+        let screenshot_result = match screenshot_response.result {
+            Some(pb::response::Result::ScreenshotResult(result)) => result,
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Failed to get screenshot".to_string()
+                )]));
+            }
+        };
+
+        // Step 4: Filter elements to interactive/text elements (unless include_all is true)
+        let filtered_elements: Vec<_> = ui_tree.elements.iter()
+            .filter(|e| {
+                if include_all {
+                    true
+                } else {
+                    // Include interactive elements or text-bearing elements
+                    e.clickable || e.focusable || e.checkable || e.scrollable || !e.text.is_empty()
+                }
+            })
+            .map(|e| {
+                // Calculate center coordinates
+                let bounds = e.bounds.as_ref();
+                let center_x = bounds.map(|b| (b.left + b.right) / 2).unwrap_or(0);
+                let center_y = bounds.map(|b| (b.top + b.bottom) / 2).unwrap_or(0);
+
+                serde_json::json!({
+                    "element_id": e.element_id,
+                    "resource_id": e.resource_id,
+                    "class_name": e.class_name,
+                    "text": e.text,
+                    "content_description": e.content_description,
+                    "bounds": bounds.map(|b| serde_json::json!({
+                        "left": b.left,
+                        "top": b.top,
+                        "right": b.right,
+                        "bottom": b.bottom,
+                    })),
+                    "center": {
+                        "x": center_x,
+                        "y": center_y,
+                    },
+                    "clickable": e.clickable,
+                    "focusable": e.focusable,
+                    "checkable": e.checkable,
+                    "scrollable": e.scrollable,
+                    "enabled": e.enabled,
+                    "visible": e.visible,
+                })
+            })
+            .collect();
+
+        // Step 5: Build comprehensive response
+        let result = serde_json::json!({
+            "success": true,
+            "app_info": {
+                "package_name": app_info.package_name,
+                "activity_name": app_info.activity_name,
+                "is_launcher": app_info.is_launcher,
+            },
+            "ui_tree": {
+                "total_elements": ui_tree.total_nodes,
+                "filtered_elements": filtered_elements.len(),
+                "elements": filtered_elements,
+            },
+            "screenshot": {
+                "width": screenshot_result.width,
+                "height": screenshot_result.height,
+                "format": "jpeg",
+                "data": base64::engine::general_purpose::STANDARD.encode(&screenshot_result.image_data),
+                "size_bytes": screenshot_result.image_data.len(),
+            },
+            "capture_timestamp": ui_tree.capture_timestamp,
         });
 
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
@@ -1778,6 +2051,36 @@ impl NeuralBridgeServer {
     }
 
     #[tool(
+        name = "android_clear_app_data",
+        description = "Clear all app data (cache, databases, shared preferences) for a package. Equivalent to Settings > Apps > Clear Data. Uses ADB shell command."
+    )]
+    async fn android_clear_app_data(
+        &self,
+        Parameters(params): Parameters<ClearAppDataParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_clear_app_data({})", params.package_name);
+
+        // Get device ID
+        let device_id = self.state.device_id.read().await;
+        let device_id_str = device_id.as_ref()
+            .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected")))?;
+
+        // Execute ADB clear_app_data (SLOW PATH)
+        let adb = self.state.device_manager().adb();
+        adb.clear_app_data(device_id_str, &params.package_name).await
+            .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to clear app data: {}", e)))?;
+
+        // Return success result
+        let result = serde_json::json!({
+            "success": true,
+            "package_name": params.package_name,
+            "message": "App data cleared successfully",
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    #[tool(
         name = "android_open_url",
         description = "Open a URL or deep link in the default browser."
     )]
@@ -1904,6 +2207,84 @@ impl NeuralBridgeServer {
     }
 
     #[tool(
+        name = "android_wait_for_gone",
+        description = "Wait until a UI element disappears from the screen. Useful for waiting for loading dialogs, splash screens, or progress indicators to dismiss. Returns found=false when element is gone (success), found=true if still present after timeout."
+    )]
+    async fn android_wait_for_gone(
+        &self,
+        Parameters(params): Parameters<WaitForGoneParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_wait_for_gone");
+
+        // Get connection
+        let conn = self.state.get_connection().await
+            .map_err(to_mcp_error)?;
+
+        // Build selector from params
+        let selector = pb::Selector {
+            text: params.text.unwrap_or_default(),
+            content_desc: params.content_desc.unwrap_or_default(),
+            resource_id: params.resource_id.unwrap_or_default(),
+            class_name: String::new(),
+            element_id: String::new(),
+            exact_match: false,
+            visible_only: true,
+            enabled_only: false,
+            clickable: None,
+            scrollable: None,
+            focusable: None,
+            long_clickable: None,
+            checkable: None,
+            checked: None,
+            index: 0,
+        };
+
+        // Build request
+        let request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::WaitForGone(pb::WaitForGoneRequest {
+                selector: Some(selector),
+                timeout_ms: params.timeout_ms.unwrap_or(5000),
+                poll_interval_ms: 100,
+            })),
+        };
+
+        // Send and await response
+        let response = conn.send_request(request).await
+            .map_err(to_mcp_error)?;
+
+        // Check success
+        if !response.success {
+            // Timeout means element is still visible
+            if response.error_code == pb::ErrorCode::Timeout as i32 {
+                let result = serde_json::json!({
+                    "success": true,
+                    "found": true,
+                    "elapsed_ms": response.latency_ms,
+                    "reason": "timeout",
+                    "message": "Element is still visible after timeout",
+                });
+                return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+            }
+
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to wait for element to disappear: {}",
+                response.error_message
+            ))]));
+        }
+
+        // Return success result (element is gone)
+        let result = serde_json::json!({
+            "success": true,
+            "found": false,
+            "elapsed_ms": response.latency_ms,
+            "message": "Element disappeared successfully",
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    #[tool(
         name = "android_wait_for_idle",
         description = "Wait until the UI stabilizes (no changes for 300ms)."
     )]
@@ -1958,6 +2339,233 @@ impl NeuralBridgeServer {
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
+    #[tool(
+        name = "android_scroll_to_element",
+        description = "Scroll to find an element that may be off-screen. Automatically scrolls through lists, recycler views, and scroll containers until the target element is found or the end of content is reached."
+    )]
+    async fn android_scroll_to_element(
+        &self,
+        Parameters(params): Parameters<ScrollToElementParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_scroll_to_element");
+
+        let start_time = std::time::Instant::now();
+        let timeout_ms = params.timeout_ms.unwrap_or(30000);
+        let max_scrolls = params.max_scrolls.unwrap_or(20);
+        let direction = params.direction.unwrap_or_else(|| "up".to_string());
+
+        // Get connection
+        let conn = self.state.get_connection().await
+            .map_err(to_mcp_error)?;
+
+        // Build selector from params
+        let selector = pb::Selector {
+            text: params.text.clone().unwrap_or_default(),
+            content_desc: params.content_desc.clone().unwrap_or_default(),
+            resource_id: params.resource_id.clone().unwrap_or_default(),
+            class_name: String::new(),
+            element_id: String::new(),
+            exact_match: false,
+            visible_only: true,
+            enabled_only: false,
+            clickable: None,
+            scrollable: None,
+            focusable: None,
+            long_clickable: None,
+            checkable: None,
+            checked: None,
+            index: 0,
+        };
+
+        // Step 1: Check if element is already visible
+        let find_request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::FindElements(pb::FindElementsRequest {
+                selector: Some(selector.clone()),
+                find_all: false,
+                visible_only: true,
+            })),
+        };
+
+        let response = conn.send_request(find_request).await
+            .map_err(to_mcp_error)?;
+
+        if response.success {
+            if let Some(pb::response::Result::ElementList(element_list)) = response.result {
+                if !element_list.elements.is_empty() {
+                    let element = &element_list.elements[0];
+                    let result = serde_json::json!({
+                        "success": true,
+                        "found": true,
+                        "scrolls": 0,
+                        "elapsed_ms": start_time.elapsed().as_millis() as i64,
+                        "element": {
+                            "element_id": element.element_id,
+                            "bounds": element.bounds.as_ref().map(|b| serde_json::json!({
+                                "left": b.left,
+                                "top": b.top,
+                                "right": b.right,
+                                "bottom": b.bottom,
+                            })),
+                        },
+                    });
+                    return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                }
+            }
+        }
+
+        // Step 2: Get UI tree to identify scrollable elements (for future optimization)
+        // For now, we'll just start scrolling
+
+        // Convert direction string to Direction enum
+        let fling_direction = match direction.to_lowercase().as_str() {
+            "up" => pb::Direction::Up,
+            "down" => pb::Direction::Down,
+            "left" => pb::Direction::Left,
+            "right" => pb::Direction::Right,
+            _ => pb::Direction::Up, // default
+        };
+
+        // Step 3: Scroll loop
+        let mut previous_hash: Option<u64> = None;
+        let mut scroll_count = 0;
+
+        for _i in 0..max_scrolls {
+            // Check timeout
+            if start_time.elapsed().as_millis() as i64 > timeout_ms as i64 {
+                let result = serde_json::json!({
+                    "success": false,
+                    "found": false,
+                    "scrolls": scroll_count,
+                    "elapsed_ms": start_time.elapsed().as_millis() as i64,
+                    "reason": "timeout",
+                    "message": "Element not found within timeout",
+                });
+                return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+            }
+
+            // Step 3a: Fling
+            let fling_request = Request {
+                request_id: Uuid::new_v4().to_string(),
+                command: Some(Command::Fling(pb::FlingRequest {
+                    direction: fling_direction as i32,
+                })),
+            };
+
+            conn.send_request(fling_request).await
+                .map_err(to_mcp_error)?;
+
+            scroll_count += 1;
+
+            // Step 3b: Wait for idle
+            let idle_request = Request {
+                request_id: Uuid::new_v4().to_string(),
+                command: Some(Command::WaitForIdle(pb::WaitForIdleRequest {
+                    timeout_ms: 300,
+                })),
+            };
+
+            conn.send_request(idle_request).await
+                .map_err(to_mcp_error)?;
+
+            // Step 3c: Find element again
+            let find_request = Request {
+                request_id: Uuid::new_v4().to_string(),
+                command: Some(Command::FindElements(pb::FindElementsRequest {
+                    selector: Some(selector.clone()),
+                    find_all: false,
+                    visible_only: true,
+                })),
+            };
+
+            let response = conn.send_request(find_request).await
+                .map_err(to_mcp_error)?;
+
+            if response.success {
+                if let Some(pb::response::Result::ElementList(element_list)) = response.result {
+                    if !element_list.elements.is_empty() {
+                        let element = &element_list.elements[0];
+                        let result = serde_json::json!({
+                            "success": true,
+                            "found": true,
+                            "scrolls": scroll_count,
+                            "elapsed_ms": start_time.elapsed().as_millis() as i64,
+                            "element": {
+                                "element_id": element.element_id,
+                                "bounds": element.bounds.as_ref().map(|b| serde_json::json!({
+                                    "left": b.left,
+                                    "top": b.top,
+                                    "right": b.right,
+                                    "bottom": b.bottom,
+                                })),
+                            },
+                        });
+                        return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                    }
+                }
+            }
+
+            // Step 3d: Get UI tree and compute hash
+            let tree_request = Request {
+                request_id: Uuid::new_v4().to_string(),
+                command: Some(Command::GetUiTree(pb::GetUiTreeRequest {
+                    include_invisible: false,
+                    include_webview: false,
+                    max_depth: 0,
+                })),
+            };
+
+            let response = conn.send_request(tree_request).await
+                .map_err(to_mcp_error)?;
+
+            if response.success {
+                if let Some(pb::response::Result::UiTree(ui_tree)) = response.result {
+                    // Compute hash of visible element IDs
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+
+                    let mut hasher = DefaultHasher::new();
+                    for element in &ui_tree.elements {
+                        if element.visible {
+                            element.element_id.hash(&mut hasher);
+                        }
+                    }
+                    let current_hash = hasher.finish();
+
+                    // Step 3e: Check if we've reached the end
+                    if let Some(prev_hash) = previous_hash {
+                        if current_hash == prev_hash {
+                            // End of scroll reached
+                            let result = serde_json::json!({
+                                "success": false,
+                                "found": false,
+                                "scrolls": scroll_count,
+                                "elapsed_ms": start_time.elapsed().as_millis() as i64,
+                                "reason": "end_of_scroll",
+                                "message": "Reached end of scrollable content without finding element",
+                            });
+                            return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                        }
+                    }
+
+                    previous_hash = Some(current_hash);
+                }
+            }
+        }
+
+        // Max scrolls reached
+        let result = serde_json::json!({
+            "success": false,
+            "found": false,
+            "scrolls": scroll_count,
+            "elapsed_ms": start_time.elapsed().as_millis() as i64,
+            "reason": "max_scrolls",
+            "message": format!("Element not found after {} scrolls", max_scrolls),
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
     // ========================================================================
     // EVENT tools
     // ========================================================================
@@ -1970,26 +2578,49 @@ impl NeuralBridgeServer {
         &self,
         Parameters(params): Parameters<EnableEventsParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!("Tool: android_enable_events(enable={}) - WORKAROUND: disabled due to protocol corruption", params.enable);
+        info!("Tool: android_enable_events(enable={})", params.enable);
 
-        // TODO: Event streaming disabled due to protocol corruption bug (Task #3)
-        // Root cause: 1-byte buffer misalignment when Event messages are sent
-        // Hex dump shows buffer starts with [0x42, 0x03, ...] instead of [0x4E, 0x42, 0x03, ...]
-        // Previous message extraction consumes one extra byte, corrupting subsequent reads
-        //
-        // Full RCA documented in: python-demo/.claude/scratch/task3_protocol_corruption_analysis.md
-        // Fix deferred to Task #6 (requires protobuf encoding investigation)
-        //
-        // WORKAROUND: Return success without actually enabling events
-        // This prevents Event messages from being sent, avoiding corruption
-        // Scenarios 4-7 can run without hitting the bug
+        // Convert event type strings to i32 enum values
+        let event_types = params.event_types.unwrap_or_default().iter().filter_map(|s| {
+            match s.to_lowercase().as_str() {
+                "ui_change" => Some(1),
+                "notification_posted" => Some(2),
+                "toast_shown" => Some(3),
+                "app_crash" => Some(4),
+                _ => None,
+            }
+        }).collect::<Vec<i32>>();
 
-        // Return success result immediately (no companion app call)
+        // Get connection
+        let conn = self.state.get_connection().await
+            .map_err(to_mcp_error)?;
+
+        // Build request
+        let request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::EnableEvents(pb::EnableEventsRequest {
+                enable: params.enable,
+                event_types,
+            })),
+        };
+
+        // Send and await response
+        let response = conn.send_request(request).await
+            .map_err(to_mcp_error)?;
+
+        // Check success
+        if !response.success {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to enable events: {}",
+                response.error_message
+            ))]));
+        }
+
+        // Return success result
         let result = serde_json::json!({
             "success": true,
             "enabled": params.enable,
-            "note": "Event streaming temporarily disabled (workaround for protocol bug)",
-            "latency_ms": 0,
+            "latency_ms": response.latency_ms,
         });
 
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
@@ -2132,6 +2763,409 @@ impl NeuralBridgeServer {
 
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
+
+    // ========================================================================
+    // TEST & DEBUG tools (Sprint 3)
+    // ========================================================================
+
+    #[tool(
+        name = "android_capture_logcat",
+        description = "Capture logcat output for debugging. Filter by package, log level, or crash reports. Returns recent log lines from the device. Slow path via ADB (~200-500ms)."
+    )]
+    async fn android_capture_logcat(
+        &self,
+        Parameters(params): Parameters<CaptureLogcatParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_capture_logcat");
+
+        // Get device ID
+        let device_id = self.state.device_id.read().await;
+        let device_id_str = device_id.as_ref()
+            .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected")))?;
+
+        // Execute ADB command to capture logcat
+        let adb = self.state.device_manager().adb();
+        let level = params.level.as_deref().unwrap_or("W");
+        let lines = params.lines.unwrap_or(100);
+        let crash_only = params.crash_only.unwrap_or(false);
+
+        let log_output = adb.capture_logcat(
+            device_id_str,
+            params.package.as_deref(),
+            level,
+            lines,
+            crash_only,
+        ).await
+        .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to capture logcat: {}", e)))?;
+
+        // Return result
+        let result = serde_json::json!({
+            "success": true,
+            "log": log_output,
+            "lines_returned": log_output.lines().count(),
+            "package": params.package,
+            "level": level,
+            "crash_only": crash_only,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    #[tool(
+        name = "android_screenshot_diff",
+        description = "Compare a reference screenshot with the current screen. Returns a similarity score (0.0-1.0) and whether the screens match within the threshold. Use for visual regression testing and detecting UI changes."
+    )]
+    async fn android_screenshot_diff(
+        &self,
+        Parameters(params): Parameters<ScreenshotDiffParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_screenshot_diff");
+
+        // Take a new screenshot
+        let conn = self.state.get_connection().await
+            .map_err(to_mcp_error)?;
+
+        let request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::Screenshot(pb::ScreenshotRequest {
+                quality: pb::ScreenshotQuality::Full as i32,
+                use_adb_fallback: false,
+            })),
+        };
+
+        let response = conn.send_request(request).await
+            .map_err(to_mcp_error)?;
+
+        if !response.success {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to take screenshot: {}",
+                response.error_message
+            ))]));
+        }
+
+        // Extract screenshot result
+        let screenshot_result = match response.result {
+            Some(pb::response::Result::ScreenshotResult(result)) => result,
+            _ => return Ok(CallToolResult::error(vec![Content::text(
+                "Invalid response: expected screenshot result".to_string()
+            )])),
+        };
+
+        // Decode both images
+        let reference_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&params.reference_base64)
+            .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to decode reference image: {}", e)))?;
+
+        let current_bytes = &screenshot_result.image_data;
+
+        let reference_img = image::load_from_memory(&reference_bytes)
+            .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to load reference image: {}", e)))?
+            .to_rgba8();
+
+        let current_img = image::load_from_memory(current_bytes)
+            .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to load current screenshot: {}", e)))?
+            .to_rgba8();
+
+        // Check dimensions match
+        if reference_img.dimensions() != current_img.dimensions() {
+            let result = serde_json::json!({
+                "success": true,
+                "match": false,
+                "similarity": 0.0,
+                "reference_dimensions": {
+                    "width": reference_img.width(),
+                    "height": reference_img.height(),
+                },
+                "current_dimensions": {
+                    "width": current_img.width(),
+                    "height": current_img.height(),
+                },
+                "reason": "Dimensions mismatch",
+            });
+            return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+        }
+
+        // Compare pixels
+        let total_pixels = (reference_img.width() * reference_img.height()) as usize;
+        let mut matching_pixels = 0;
+
+        for (ref_pixel, cur_pixel) in reference_img.pixels().zip(current_img.pixels()) {
+            // Check if pixels match within tolerance (±10 per channel)
+            let r_diff = (ref_pixel[0] as i32 - cur_pixel[0] as i32).abs();
+            let g_diff = (ref_pixel[1] as i32 - cur_pixel[1] as i32).abs();
+            let b_diff = (ref_pixel[2] as i32 - cur_pixel[2] as i32).abs();
+
+            if r_diff <= 10 && g_diff <= 10 && b_diff <= 10 {
+                matching_pixels += 1;
+            }
+        }
+
+        let similarity = matching_pixels as f64 / total_pixels as f64;
+        let threshold = params.threshold.unwrap_or(0.95);
+        let is_match = similarity >= threshold;
+
+        let result = serde_json::json!({
+            "success": true,
+            "match": is_match,
+            "similarity": similarity,
+            "threshold": threshold,
+            "width": reference_img.width(),
+            "height": reference_img.height(),
+            "total_pixels": total_pixels,
+            "matching_pixels": matching_pixels,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    #[tool(
+        name = "android_get_recent_toasts",
+        description = "Get recently shown toast messages. Requires event streaming to be enabled first via android_enable_events. Returns toasts from the event buffer."
+    )]
+    async fn android_get_recent_toasts(
+        &self,
+        Parameters(params): Parameters<GetRecentToastsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_get_recent_toasts");
+
+        let since_ms = params.since_ms.unwrap_or(5000);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let cutoff_time = current_time - since_ms;
+
+        // Read from event buffer
+        let event_buffer = self.state.event_buffer.read().await;
+        let toasts: Vec<_> = event_buffer
+            .iter()
+            .filter(|event| {
+                event.event_type == pb::EventType::ToastShown as i32
+                    && event.timestamp >= cutoff_time
+            })
+            .filter_map(|event| {
+                match &event.data {
+                    Some(pb::event::Data::Toast(toast)) => Some(serde_json::json!({
+                        "text": toast.text,
+                        "timestamp": event.timestamp,
+                    })),
+                    _ => None,
+                }
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "success": true,
+            "toasts": toasts,
+            "total_count": toasts.len(),
+            "since_ms": since_ms,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    #[tool(
+        name = "android_pull_to_refresh",
+        description = "Perform a pull-to-refresh gesture. Swipes down from the top portion of the screen. Useful for refreshing content in apps that support pull-to-refresh."
+    )]
+    async fn android_pull_to_refresh(&self) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_pull_to_refresh");
+
+        // Get connection
+        let conn = self.state.get_connection().await
+            .map_err(to_mcp_error)?;
+
+        // Perform swipe down from (540, 400) to (540, 1400) over 500ms
+        let swipe_request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::Swipe(pb::SwipeRequest {
+                start: Some(pb::Point { x: 540, y: 400 }),
+                end: Some(pb::Point { x: 540, y: 1400 }),
+                duration_ms: 500,
+            })),
+        };
+
+        let response = conn.send_request(swipe_request).await
+            .map_err(to_mcp_error)?;
+
+        if !response.success {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to perform pull-to-refresh: {}",
+                response.error_message
+            ))]));
+        }
+
+        // Wait for UI to settle
+        let wait_request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::WaitForIdle(pb::WaitForIdleRequest {
+                timeout_ms: 2000,
+            })),
+        };
+
+        conn.send_request(wait_request).await
+            .map_err(to_mcp_error)?;
+
+        let result = serde_json::json!({
+            "success": true,
+            "latency_ms": response.latency_ms,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    #[tool(
+        name = "android_dismiss_keyboard",
+        description = "Dismiss the on-screen keyboard if it is currently visible. Uses the system back action, which is the most reliable method across Android versions."
+    )]
+    async fn android_dismiss_keyboard(&self) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_dismiss_keyboard");
+
+        // Get connection
+        let conn = self.state.get_connection().await
+            .map_err(to_mcp_error)?;
+
+        // Send global back action
+        let request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::GlobalAction(pb::GlobalActionRequest {
+                action: pb::GlobalAction::GlobalBack as i32,
+            })),
+        };
+
+        let response = conn.send_request(request).await
+            .map_err(to_mcp_error)?;
+
+        if !response.success {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to dismiss keyboard: {}",
+                response.error_message
+            ))]));
+        }
+
+        let result = serde_json::json!({
+            "success": true,
+            "latency_ms": response.latency_ms,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    #[tool(
+        name = "android_accessibility_audit",
+        description = "Audit the current screen for accessibility issues. Checks for missing content descriptions, small touch targets (<48dp), and non-focusable interactive elements. Returns a list of violations with element information."
+    )]
+    async fn android_accessibility_audit(&self) -> Result<CallToolResult, McpError> {
+        info!("Tool: android_accessibility_audit");
+
+        // Get connection
+        let conn = self.state.get_connection().await
+            .map_err(to_mcp_error)?;
+
+        // Get UI tree
+        let request = Request {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(Command::GetUiTree(pb::GetUiTreeRequest {
+                include_invisible: false,
+                include_webview: false,
+                max_depth: 0,
+            })),
+        };
+
+        let response = conn.send_request(request).await
+            .map_err(to_mcp_error)?;
+
+        if !response.success {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to get UI tree: {}",
+                response.error_message
+            ))]));
+        }
+
+        // Extract UI tree
+        let ui_tree = match response.result {
+            Some(pb::response::Result::UiTree(tree)) => tree,
+            _ => return Ok(CallToolResult::error(vec![Content::text(
+                "Invalid response: expected UI tree".to_string()
+            )])),
+        };
+
+        // Audit elements for accessibility issues
+        let mut violations = Vec::new();
+
+        for element in &ui_tree.elements {
+            // Check if element is clickable
+            if !element.clickable {
+                continue;
+            }
+
+            // Get bounds (handle Option<Bounds>)
+            let bounds = match &element.bounds {
+                Some(b) => b,
+                None => continue, // Skip elements without bounds
+            };
+
+            // Issue 1: Missing label
+            if element.text.is_empty() && element.content_description.is_empty() {
+                violations.push(serde_json::json!({
+                    "issue": "Missing label",
+                    "severity": "warning",
+                    "element_id": element.element_id,
+                    "resource_id": element.resource_id,
+                    "class_name": element.class_name,
+                    "bounds": format!("[{},{},{},{}]",
+                        bounds.left, bounds.top,
+                        bounds.right, bounds.bottom),
+                    "recommendation": "Add text or content description for screen readers",
+                }));
+            }
+
+            // Issue 2: Small touch target (< 96 pixels ≈ 48dp on mdpi)
+            let width = bounds.right - bounds.left;
+            let height = bounds.bottom - bounds.top;
+
+            if width < 96 || height < 96 {
+                violations.push(serde_json::json!({
+                    "issue": "Small touch target",
+                    "severity": "error",
+                    "element_id": element.element_id,
+                    "resource_id": element.resource_id,
+                    "text": element.text,
+                    "size": format!("{}x{}", width, height),
+                    "bounds": format!("[{},{},{},{}]",
+                        bounds.left, bounds.top,
+                        bounds.right, bounds.bottom),
+                    "recommendation": "Increase touch target to at least 48dp (96px on mdpi)",
+                }));
+            }
+
+            // Issue 3: Not keyboard accessible
+            if !element.focusable {
+                violations.push(serde_json::json!({
+                    "issue": "Not keyboard accessible",
+                    "severity": "warning",
+                    "element_id": element.element_id,
+                    "resource_id": element.resource_id,
+                    "text": element.text,
+                    "bounds": format!("[{},{},{},{}]",
+                        bounds.left, bounds.top,
+                        bounds.right, bounds.bottom),
+                    "recommendation": "Make element focusable for keyboard navigation",
+                }));
+            }
+        }
+
+        let result = serde_json::json!({
+            "success": true,
+            "total_elements": ui_tree.elements.len(),
+            "interactive_elements": ui_tree.elements.iter().filter(|e| e.clickable).count(),
+            "violations": violations,
+            "violation_count": violations.len(),
+            "score": if violations.is_empty() { "Pass" } else { "Fail" },
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
 }
 
 // ============================================================================
@@ -2190,7 +3224,25 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
             Ok(devices) => {
-                let selected = devices[0].clone();
+                // Prefer device where companion app is fully ready
+                let mut selected = devices[0].clone();
+                for d in &devices {
+                    match device_manager.check_permissions(d).await {
+                        Ok(status) if status.is_ready() => {
+                            info!("Found fully ready device: {}", d);
+                            selected = d.clone();
+                            break;
+                        }
+                        Ok(status) => {
+                            if status.companion_installed {
+                                info!("Device {} has companion but missing permissions", d);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to check device {}: {}", d, e);
+                        }
+                    }
+                }
                 info!("Auto-selected device: {}", selected);
                 device_id = Some(selected);
             }

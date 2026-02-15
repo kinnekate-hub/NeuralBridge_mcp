@@ -2,7 +2,8 @@ package com.neuralbridge.companion
 
 import android.Manifest
 import android.app.Activity
-import android.app.NotificationManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -10,522 +11,451 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Log
 import android.text.TextUtils
-import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.View
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.ScrollView
+import android.widget.ProgressBar
+import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.neuralbridge.companion.adapter.LogAdapter
+import com.neuralbridge.companion.log.CommandLog
+import com.neuralbridge.companion.service.NeuralBridgeAccessibilityService
 
-/**
- * Main Activity
- *
- * Permission management UI showing status of all required permissions
- * with direct shortcuts to system settings for each.
- */
 class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_CODE_POST_NOTIFICATIONS = 1001
-        private const val TAG = "MainActivity"
     }
 
-    // Permission status views
-    private val permissionViews = mutableMapOf<String, PermissionView>()
+    // Tab views
+    private lateinit var tabStatus: TextView
+    private lateinit var tabSetup: TextView
+    private lateinit var tabLogs: TextView
+    private lateinit var tabIndicator: View
+    private lateinit var tabStatusContent: View
+    private lateinit var tabSetupContent: View
+    private lateinit var tabLogsContent: View
 
-    private lateinit var progressText: TextView
+    // Header
+    private lateinit var statusDot: View
     private lateinit var overallStatusText: TextView
-    private lateinit var serviceStatusText: TextView
-    private lateinit var connectionInfoText: TextView
+
+    // Status tab views
+    private lateinit var connectionStatusIcon: TextView
+    private lateinit var connectionStatusText: TextView
+    private lateinit var connectionDetailText: TextView
+    private lateinit var accessibilityStatusBar: View
+    private lateinit var accessibilityStatusTextView: TextView
+    private lateinit var tcpStatusBar: View
+    private lateinit var tcpStatusText: TextView
+    private lateinit var screenshotStatusBar: View
+    private lateinit var screenshotStatusText: TextView
+    private lateinit var deviceInfoText: TextView
+    private lateinit var perfP50: TextView
+    private lateinit var perfP95: TextView
+    private lateinit var perfP99: TextView
+    private lateinit var perfCount: TextView
+
+    // Setup tab views
+    private lateinit var permissionProgressLabel: TextView
+    private lateinit var permissionProgressBar: ProgressBar
+    private lateinit var permissionCardsContainer: LinearLayout
+
+    // Logs tab views
+    private lateinit var logRecyclerView: RecyclerView
+    private lateinit var logEmptyText: TextView
+    private lateinit var logAdapter: LogAdapter
+    private var logsPaused = false
+    private var logFilter: String = "ALL"
+
+    // Polling
+    private val statusHandler = Handler(Looper.getMainLooper())
+    private val statusRunnable = object : Runnable {
+        override fun run() {
+            updateServiceStatus()
+            updatePerformanceStats()
+            if (!logsPaused) updateLogEntries()
+            statusHandler.postDelayed(this, 1000)
+        }
+    }
+
+    private var currentTab = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(createView())
+        setContentView(R.layout.activity_main)
 
-        // Request POST_NOTIFICATIONS permission at runtime (Android 13+)
+        findViews()
+        setupTabs()
+        setupSetupTab()
+        setupLogsTab()
+        updateDeviceInfo()
+
         requestNotificationPermissionIfNeeded()
-
-        updateAllStatus()
+        updateAllPermissionStatus()
     }
 
     override fun onResume() {
         super.onResume()
-        updateAllStatus()
+        NeuralBridgeAccessibilityService.instance?.tryConsumeMediaProjectionConsent()
+        updateAllPermissionStatus()
+        statusHandler.post(statusRunnable)
     }
 
-    /**
-     * Create comprehensive permission management UI
-     */
-    private fun createView(): View {
-        val scrollView = ScrollView(this)
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val padding = resources.getDimensionPixelSize(R.dimen.screen_padding_horizontal)
-            setPadding(padding, padding, padding, padding)
-            setBackgroundResource(R.drawable.bg_wave_pattern)
-        }
-
-        // App title
-        layout.addView(createTextView("NeuralBridge", R.style.TextAppearance_NeuralBridge_HeadlineLarge, true).apply {
-            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_medium)
-            setPadding(0, 0, 0, paddingBottom)
-            setTextColor(getColor(R.color.wave_blue))
-        })
-
-        // Progress indicator
-        progressText = createTextView("Checking permissions...", R.style.TextAppearance_NeuralBridge_BodyMedium, false).apply {
-            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_small)
-            setPadding(0, 0, 0, paddingBottom)
-        }
-        layout.addView(progressText)
-
-        // Overall status
-        overallStatusText = createTextView("", R.style.TextAppearance_NeuralBridge_TitleLarge, true).apply {
-            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_large)
-            setPadding(0, 0, 0, paddingBottom)
-        }
-        layout.addView(overallStatusText)
-
-        // Section: Required Permissions
-        layout.addView(createTextView("REQUIRED PERMISSIONS", R.style.TextAppearance_NeuralBridge_TitleMedium, true).apply {
-            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_medium)
-            setPadding(0, 0, 0, paddingBottom)
-            setTextColor(getColor(R.color.wave_purple))
-        })
-
-        // 1. AccessibilityService
-        permissionViews["accessibility"] = createPermissionView(
-            "AccessibilityService",
-            "Core automation service for UI control and observation"
-        ).also { layout.addView(it.container) }
-
-        // 2. NotificationListenerService
-        permissionViews["notification_listener"] = createPermissionView(
-            "Notification Listener",
-            "Access full notification content (title, text, actions)"
-        ).also { layout.addView(it.container) }
-
-        // 3. POST_NOTIFICATIONS (Android 13+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            permissionViews["post_notifications"] = createPermissionView(
-                "Notification Permission",
-                "Show foreground service notification"
-            ).also { layout.addView(it.container) }
-        }
-
-        // 4. Battery optimization exemption (recommended)
-        permissionViews["battery"] = createPermissionView(
-            "Battery Optimization Exempt",
-            "Prevent Android from killing the service (recommended)"
-        ).also { layout.addView(it.container) }
-
-        // 5. Restricted Settings (Android 15+)
-        if (Build.VERSION.SDK_INT >= 35) { // Android 15+
-            permissionViews["restricted_settings"] = createPermissionView(
-                "Restricted Settings",
-                "Allow full AccessibilityService permissions (Android 15+)"
-            ).also { layout.addView(it.container) }
-        }
-
-        // Section: Service Status
-        layout.addView(createTextView("SERVICE STATUS", R.style.TextAppearance_NeuralBridge_TitleMedium, true).apply {
-            val paddingTop = resources.getDimensionPixelSize(R.dimen.spacing_large)
-            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_medium)
-            setPadding(0, paddingTop, 0, paddingBottom)
-            setTextColor(getColor(R.color.wave_purple))
-        })
-
-        serviceStatusText = createTextView("", R.style.TextAppearance_NeuralBridge_BodyMedium, false).apply {
-            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_small)
-            setPadding(0, 0, 0, paddingBottom)
-        }
-        layout.addView(serviceStatusText)
-
-        connectionInfoText = createTextView("", R.style.TextAppearance_NeuralBridge_BodyMedium, false).apply {
-            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_medium)
-            setPadding(0, 0, 0, paddingBottom)
-        }
-        layout.addView(connectionInfoText)
-
-        // ADB Setup Instructions
-        layout.addView(createTextView("ADB SETUP", R.style.TextAppearance_NeuralBridge_TitleMedium, true).apply {
-            val paddingTop = resources.getDimensionPixelSize(R.dimen.spacing_small)
-            val paddingBottom = resources.getDimensionPixelSize(R.dimen.spacing_medium)
-            setPadding(0, paddingTop, 0, paddingBottom)
-            setTextColor(getColor(R.color.wave_purple))
-        })
-
-        layout.addView(createTextView(
-            "$ adb forward tcp:38472 tcp:38472\n$ cargo run --release -- --auto-discover",
-            R.style.TextAppearance_NeuralBridge_BodySmall,
-            false
-        ).apply {
-            val padding = resources.getDimensionPixelSize(R.dimen.spacing_medium)
-            val paddingVert = resources.getDimensionPixelSize(R.dimen.spacing_small)
-            setPadding(padding, paddingVert, padding, paddingVert)
-            setBackgroundColor(getColor(R.color.md_theme_dark_surface))
-            setTextColor(getColor(R.color.success))
-            typeface = android.graphics.Typeface.MONOSPACE
-        })
-
-        scrollView.addView(layout)
-        return scrollView
+    override fun onPause() {
+        super.onPause()
+        statusHandler.removeCallbacks(statusRunnable)
     }
 
-    /**
-     * Create a permission view with status indicator and action button
-     */
-    private fun createPermissionView(title: String, description: String): PermissionView {
-        val cardPadding = resources.getDimensionPixelSize(R.dimen.card_padding)
-        val spacingSmall = resources.getDimensionPixelSize(R.dimen.spacing_small)
-        val spacingMedium = resources.getDimensionPixelSize(R.dimen.spacing_medium)
+    private fun findViews() {
+        // Tab bar
+        tabStatus = findViewById(R.id.tabStatus)
+        tabSetup = findViewById(R.id.tabSetup)
+        tabLogs = findViewById(R.id.tabLogs)
+        tabIndicator = findViewById(R.id.tabIndicator)
+        tabStatusContent = findViewById(R.id.tabStatusContent)
+        tabSetupContent = findViewById(R.id.tabSetupContent)
+        tabLogsContent = findViewById(R.id.tabLogsContent)
 
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(cardPadding, cardPadding, cardPadding, cardPadding)
-            setBackgroundResource(R.drawable.bg_card_wave)
-            elevation = resources.getDimension(R.dimen.elevation_card)
-            val params = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-            params.setMargins(0, 0, 0, spacingSmall)
-            layoutParams = params
-        }
+        // Header
+        statusDot = findViewById(R.id.statusDot)
+        overallStatusText = findViewById(R.id.overallStatusText)
 
-        // Title row with status indicator
-        val titleRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
+        // Status tab
+        connectionStatusIcon = findViewById(R.id.connectionStatusIcon)
+        connectionStatusText = findViewById(R.id.connectionStatusText)
+        connectionDetailText = findViewById(R.id.connectionDetailText)
+        accessibilityStatusBar = findViewById(R.id.accessibilityStatusBar)
+        accessibilityStatusTextView = findViewById(R.id.accessibilityStatusText)
+        tcpStatusBar = findViewById(R.id.tcpStatusBar)
+        tcpStatusText = findViewById(R.id.tcpStatusText)
+        screenshotStatusBar = findViewById(R.id.screenshotStatusBar)
+        screenshotStatusText = findViewById(R.id.screenshotStatusText)
+        deviceInfoText = findViewById(R.id.deviceInfoText)
+        perfP50 = findViewById(R.id.perfP50)
+        perfP95 = findViewById(R.id.perfP95)
+        perfP99 = findViewById(R.id.perfP99)
+        perfCount = findViewById(R.id.perfCount)
 
-        val statusIndicator = TextView(this).apply {
-            text = "⚠"
-            setTextAppearance(R.style.TextAppearance_NeuralBridge_TitleMedium)
-            setPadding(0, 0, spacingMedium, 0)
-        }
-        titleRow.addView(statusIndicator)
+        // Setup tab
+        permissionProgressLabel = findViewById(R.id.permissionProgressLabel)
+        permissionProgressBar = findViewById(R.id.permissionProgressBar)
+        permissionCardsContainer = findViewById(R.id.permissionCardsContainer)
 
-        val titleText = TextView(this).apply {
-            text = title
-            setTextAppearance(R.style.TextAppearance_NeuralBridge_TitleMedium)
-        }
-        titleRow.addView(titleText)
-
-        container.addView(titleRow)
-
-        // Description
-        val descriptionText = TextView(this).apply {
-            text = description
-            setTextAppearance(R.style.TextAppearance_NeuralBridge_BodySmall)
-            setPadding(30, 4, 0, spacingSmall)
-            setTextColor(getColor(R.color.text_medium_emphasis))
-        }
-        container.addView(descriptionText)
-
-        // Action button
-        val actionButton = Button(this).apply {
-            text = "GRANT"
-            setTextAppearance(R.style.TextAppearance_NeuralBridge_LabelLarge)
-            setBackgroundResource(R.drawable.btn_wave_primary)
-            val buttonPadding = resources.getDimensionPixelSize(R.dimen.spacing_large)
-            val buttonPaddingVert = resources.getDimensionPixelSize(R.dimen.spacing_small)
-            setPadding(buttonPadding, buttonPaddingVert, buttonPadding, buttonPaddingVert)
-            minimumHeight = resources.getDimensionPixelSize(R.dimen.button_height_default)
-        }
-        container.addView(actionButton)
-
-        return PermissionView(container, statusIndicator, actionButton)
+        // Logs tab
+        logRecyclerView = findViewById(R.id.logRecyclerView)
+        logEmptyText = findViewById(R.id.logEmptyText)
     }
 
-    /**
-     * Create a styled TextView with theme support
-     */
-    private fun createTextView(text: String, styleRes: Int, bold: Boolean): TextView {
-        return TextView(this).apply {
-            this.text = text
-            setTextAppearance(styleRes)
-            if (bold) setTypeface(null, android.graphics.Typeface.BOLD)
+    // ========================================================================
+    // Tab Switching
+    // ========================================================================
+
+    private fun setupTabs() {
+        tabStatus.setOnClickListener { switchTab(0) }
+        tabSetup.setOnClickListener { switchTab(1) }
+        tabLogs.setOnClickListener { switchTab(2) }
+
+        // Set initial tab indicator width
+        tabIndicator.post {
+            val tabWidth = tabStatus.width
+            tabIndicator.layoutParams = tabIndicator.layoutParams.apply {
+                width = tabWidth
+            }
+            tabIndicator.requestLayout()
         }
     }
 
-    /**
-     * Request POST_NOTIFICATIONS permission at runtime (Android 13+)
-     */
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                    REQUEST_CODE_POST_NOTIFICATIONS
-                )
+    private fun switchTab(index: Int) {
+        currentTab = index
+        val tabs = listOf(tabStatusContent, tabSetupContent, tabLogsContent)
+        val tabLabels = listOf(tabStatus, tabSetup, tabLogs)
+
+        tabs.forEachIndexed { i, view ->
+            view.visibility = if (i == index) View.VISIBLE else View.GONE
+        }
+
+        tabLabels.forEachIndexed { i, tv ->
+            tv.setTextColor(getColor(if (i == index) R.color.wave_blue else R.color.text_medium_emphasis))
+            tv.setTypeface(null, if (i == index) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+        }
+
+        // Animate tab indicator
+        val tabWidth = tabStatus.width.toFloat()
+        tabIndicator.animate()
+            .translationX(tabWidth * index)
+            .setDuration(200)
+            .start()
+    }
+
+    // ========================================================================
+    // Status Tab
+    // ========================================================================
+
+    private fun updateServiceStatus() {
+        val service = NeuralBridgeAccessibilityService.instance
+        val isRunning = service != null
+        val connectionCount = service?.getConnectionCount() ?: 0
+
+        // Header
+        if (isRunning && isAccessibilityServiceEnabled()) {
+            statusDot.setBackgroundResource(R.drawable.bg_status_dot)
+            overallStatusText.text = if (connectionCount > 0) "ALL SYSTEMS READY" else "WAITING FOR CONNECTION"
+        } else {
+            statusDot.setBackgroundColor(getColor(R.color.status_error))
+            overallStatusText.text = "SETUP INCOMPLETE"
+        }
+
+        // Connection hero card
+        if (connectionCount > 0) {
+            connectionStatusText.text = "CONNECTED"
+            connectionStatusText.setTextColor(getColor(R.color.success))
+            connectionDetailText.text = "$connectionCount agent${if (connectionCount > 1) "s" else ""} connected"
+        } else {
+            connectionStatusText.text = "WAITING FOR CONNECTION"
+            connectionStatusText.setTextColor(getColor(R.color.text_medium_emphasis))
+            connectionDetailText.text = "Port 38472"
+        }
+
+        // 3-up status grid
+        val accessibilityOn = isAccessibilityServiceEnabled()
+        accessibilityStatusBar.setBackgroundColor(getColor(if (accessibilityOn) R.color.status_active else R.color.status_inactive))
+        accessibilityStatusTextView.text = if (accessibilityOn) "ACTIVE" else "OFF"
+        accessibilityStatusTextView.setTextColor(getColor(if (accessibilityOn) R.color.success else R.color.status_error))
+
+        tcpStatusBar.setBackgroundColor(getColor(if (isRunning) R.color.status_active else R.color.status_inactive))
+        tcpStatusText.text = if (isRunning) "ACTIVE" else "OFF"
+        tcpStatusText.setTextColor(getColor(if (isRunning) R.color.success else R.color.status_error))
+
+        val screenshotReady = service?.hasMediaProjectionPermission() ?: false
+        screenshotStatusBar.setBackgroundColor(getColor(if (screenshotReady) R.color.status_active else R.color.status_inactive))
+        screenshotStatusText.text = if (screenshotReady) "FAST" else "ADB"
+        screenshotStatusText.setTextColor(getColor(if (screenshotReady) R.color.success else R.color.warning))
+    }
+
+    private fun updateDeviceInfo() {
+        val dm = resources.displayMetrics
+        val info = buildString {
+            append("Model: ${Build.MANUFACTURER} ${Build.MODEL}\n")
+            append("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
+            append("Screen: ${dm.widthPixels}x${dm.heightPixels} @ ${dm.densityDpi}dpi\n")
+            append("Density: ${dm.density}x")
+        }
+        deviceInfoText.text = info
+    }
+
+    private fun updatePerformanceStats() {
+        val stats = CommandLog.getPerformanceStats()
+        if (stats.count > 0) {
+            perfP50.text = "${stats.p50}ms"
+            perfP95.text = "${stats.p95}ms"
+            perfP99.text = "${stats.p99}ms"
+            perfCount.text = "${stats.count}"
+        } else {
+            perfP50.text = "--"
+            perfP95.text = "--"
+            perfP99.text = "--"
+            perfCount.text = "0"
+        }
+    }
+
+    // ========================================================================
+    // Setup Tab
+    // ========================================================================
+
+    private fun setupSetupTab() {
+        // Create permission cards
+        addPermissionCard("AccessibilityService", "Core automation service for UI control and observation") {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+        addPermissionCard("Notification Listener", "Access full notification content") {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        }
+        addPermissionCard("Post Notifications", "Show foreground service notification") {
+            requestNotificationPermissionIfNeeded()
+        }
+        addPermissionCard("Battery Optimization", "Prevent Android from killing the service") {
+            try {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                })
+            } catch (e: Exception) {
+                Log.w("MainActivity", "Battery optimization settings not available", e)
             }
         }
-    }
+        addPermissionCard("MediaProjection", "Enable fast screenshot capture (60ms)") {
+            startActivity(Intent(this, com.neuralbridge.companion.screenshot.ScreenshotConsentActivity::class.java))
+        }
 
-    /**
-     * Handle permission request result
-     */
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_CODE_POST_NOTIFICATIONS) {
-            updateAllStatus()
+        // Copy ADB commands button
+        findViewById<Button>(R.id.btnCopyAdbCommands).setOnClickListener {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("ADB Commands",
+                "adb forward tcp:38472 tcp:38472\ncargo run --release -- --auto-discover"))
+            Toast.makeText(this, "Copied to clipboard", Toast.LENGTH_SHORT).show()
         }
     }
 
-    /**
-     * Update all permission statuses and UI
-     */
-    private fun updateAllStatus() {
-        // Check each permission
-        val accessibilityEnabled = isAccessibilityServiceEnabled()
-        val notificationListenerEnabled = isNotificationListenerEnabled()
-        val postNotificationsGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            isPostNotificationsGranted()
-        } else {
-            true // Not required below Android 13
-        }
-        val batteryOptimizationExempt = isBatteryOptimizationExempt()
-        val restrictedSettingsAllowed = true // Cannot programmatically check this
+    private data class PermissionCardViews(
+        val container: View,
+        val statusIcon: TextView,
+        val button: Button
+    )
 
-        // Update permission views
-        updatePermissionView(
-            "accessibility",
-            accessibilityEnabled,
-            "ENABLED",
-            "ENABLE →"
-        ) { openAccessibilitySettings() }
+    private val permissionCards = mutableListOf<PermissionCardViews>()
 
-        updatePermissionView(
-            "notification_listener",
-            notificationListenerEnabled,
-            "ENABLED",
-            "ENABLE →"
-        ) { openNotificationListenerSettings() }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            updatePermissionView(
-                "post_notifications",
-                postNotificationsGranted,
-                "GRANTED",
-                "GRANT →"
-            ) { requestNotificationPermissionIfNeeded() }
-        }
-
-        updatePermissionView(
-            "battery",
-            batteryOptimizationExempt,
-            "EXEMPT",
-            "EXEMPT →"
-        ) { openBatteryOptimizationSettings() }
-
-        if (Build.VERSION.SDK_INT >= 35) { // Android 15+
-            updatePermissionView(
-                "restricted_settings",
-                restrictedSettingsAllowed,
-                "ALLOWED",
-                "OPEN →"
-            ) { openAppSettings() }
-        }
-
-        // Calculate progress
-        var granted = 0
-        var total = 0
-
-        total++
-        if (accessibilityEnabled) granted++
-
-        total++
-        if (notificationListenerEnabled) granted++
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            total++
-            if (postNotificationsGranted) granted++
-        }
-
-        // Battery optimization is optional, don't count towards required
-
-        progressText.text = "Setup Progress: $granted/$total required permissions"
-
-        // Update overall status
-        val allGranted = (granted == total)
-        if (allGranted) {
-            overallStatusText.text = "✓ ALL SYSTEMS READY"
-            overallStatusText.setTextColor(getColor(R.color.success))
-        } else {
-            overallStatusText.text = "⚠ SETUP INCOMPLETE"
-            overallStatusText.setTextColor(getColor(R.color.warning))
-        }
-
-        // Update service status
-        val service = com.neuralbridge.companion.service.NeuralBridgeAccessibilityService.instance
-        if (service != null) {
-            serviceStatusText.text = "🟢 AccessibilityService running\n🟢 TCP Server on port 38472\n🟢 Foreground Service active"
-            serviceStatusText.setTextColor(getColor(R.color.success))
-
-            // TODO: Get actual connection count from TcpServer
-            connectionInfoText.text = "📡 Ready for connections"
-        } else {
-            serviceStatusText.text = "🔴 AccessibilityService not running"
-            serviceStatusText.setTextColor(getColor(R.color.status_error))
-            connectionInfoText.text = ""
-        }
+    private fun addPermissionCard(title: String, description: String, action: () -> Unit) {
+        val view = LayoutInflater.from(this).inflate(R.layout.item_permission_card, permissionCardsContainer, false)
+        view.findViewById<TextView>(R.id.permissionTitle).text = title
+        view.findViewById<TextView>(R.id.permissionDescription).text = description
+        val btn = view.findViewById<Button>(R.id.permissionButton)
+        btn.setOnClickListener { action() }
+        val icon = view.findViewById<TextView>(R.id.permissionStatusIcon)
+        permissionCards.add(PermissionCardViews(view, icon, btn))
+        permissionCardsContainer.addView(view)
     }
 
-    /**
-     * Update a permission view with status
-     */
-    private fun updatePermissionView(
-        key: String,
-        granted: Boolean,
-        grantedText: String,
-        notGrantedText: String,
-        action: () -> Unit
-    ) {
-        val view = permissionViews[key] ?: return
+    private fun updateAllPermissionStatus() {
+        val statuses = listOf(
+            isAccessibilityServiceEnabled(),
+            isNotificationListenerEnabled(),
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) isPostNotificationsGranted() else true,
+            isBatteryOptimizationExempt(),
+            NeuralBridgeAccessibilityService.instance?.hasMediaProjectionPermission() ?: false
+        )
 
-        if (granted) {
-            view.statusIndicator.text = "✓"
-            view.statusIndicator.setTextColor(getColor(R.color.success))
-            view.actionButton.text = grantedText
-            view.actionButton.isEnabled = false
-            view.actionButton.alpha = 0.5f
-        } else {
-            view.statusIndicator.text = "✗"
-            view.statusIndicator.setTextColor(getColor(R.color.status_error))
-            view.actionButton.text = notGrantedText
-            view.actionButton.isEnabled = true
-            view.actionButton.alpha = 1.0f
-            view.actionButton.setOnClickListener { action() }
+        val granted = statuses.count { it }
+        val total = statuses.size
+
+        permissionProgressLabel.text = "PERMISSIONS $granted/$total"
+        permissionProgressBar.max = total
+        permissionProgressBar.progress = granted
+
+        permissionCards.forEachIndexed { i, card ->
+            val isGranted = statuses[i]
+            card.statusIcon.text = if (isGranted) "✓" else "✗"
+            card.statusIcon.setTextColor(getColor(if (isGranted) R.color.success else R.color.status_error))
+            card.button.text = if (isGranted) "GRANTED" else "GRANT"
+            card.button.isEnabled = !isGranted
+            card.button.alpha = if (isGranted) 0.5f else 1.0f
         }
     }
 
     // ========================================================================
-    // Permission Checking Methods
+    // Logs Tab
     // ========================================================================
 
-    /**
-     * Check if AccessibilityService is enabled
-     */
+    private fun setupLogsTab() {
+        logAdapter = LogAdapter()
+        logRecyclerView.layoutManager = LinearLayoutManager(this)
+        logRecyclerView.adapter = logAdapter
+
+        // Filter spinner
+        val spinner = findViewById<Spinner>(R.id.logFilterSpinner)
+        val filters = arrayOf("ALL", "GESTURE", "OBSERVE", "MANAGE", "WAIT", "INPUT")
+        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, filters)
+        spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                logFilter = filters[pos]
+                updateLogEntries()
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+
+        // Clear button
+        findViewById<Button>(R.id.btnClearLogs).setOnClickListener {
+            CommandLog.clear()
+            updateLogEntries()
+        }
+
+        // Pause/Resume button
+        val pauseBtn = findViewById<Button>(R.id.btnPauseLogs)
+        pauseBtn.setOnClickListener {
+            logsPaused = !logsPaused
+            pauseBtn.text = if (logsPaused) "RESUME" else "PAUSE"
+        }
+    }
+
+    private fun updateLogEntries() {
+        var entries = CommandLog.getRecent(50)
+        if (logFilter != "ALL") {
+            val category = try { CommandLog.Category.valueOf(logFilter) } catch (e: Exception) { null }
+            if (category != null) {
+                entries = entries.filter { it.category == category }
+            }
+        }
+        logAdapter.updateEntries(entries)
+
+        val hasEntries = entries.isNotEmpty()
+        logRecyclerView.visibility = if (hasEntries) View.VISIBLE else View.GONE
+        logEmptyText.visibility = if (hasEntries) View.GONE else View.VISIBLE
+
+        // Auto-scroll to top (newest entries first)
+        if (hasEntries && !logsPaused) {
+            logRecyclerView.scrollToPosition(0)
+        }
+    }
+
+    // ========================================================================
+    // Permission Checking
+    // ========================================================================
+
     private fun isAccessibilityServiceEnabled(): Boolean {
         val expectedComponentName = ComponentName(this,
-            com.neuralbridge.companion.service.NeuralBridgeAccessibilityService::class.java)
-
+            NeuralBridgeAccessibilityService::class.java)
         val enabledServicesSetting = Settings.Secure.getString(
-            contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: return false
-
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
         val colonSplitter = TextUtils.SimpleStringSplitter(':')
         colonSplitter.setString(enabledServicesSetting)
-
         while (colonSplitter.hasNext()) {
-            val componentNameString = colonSplitter.next()
-            val enabledService = ComponentName.unflattenFromString(componentNameString)
-            if (enabledService != null && enabledService == expectedComponentName) {
-                return true
-            }
+            val enabledService = ComponentName.unflattenFromString(colonSplitter.next())
+            if (enabledService == expectedComponentName) return true
         }
         return false
     }
 
-    /**
-     * Check if NotificationListenerService is enabled
-     */
     private fun isNotificationListenerEnabled(): Boolean {
-        val packageName = packageName
         val enabledListeners = Settings.Secure.getString(
-            contentResolver,
-            "enabled_notification_listeners"
-        ) ?: return false
-
+            contentResolver, "enabled_notification_listeners") ?: return false
         return enabledListeners.contains(packageName)
     }
 
-    /**
-     * Check if POST_NOTIFICATIONS permission is granted (Android 13+)
-     */
     private fun isPostNotificationsGranted(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else true
     }
 
-    /**
-     * Check if battery optimization is disabled for this app
-     */
     private fun isBatteryOptimizationExempt(): Boolean {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        // minSdk is 24, which is >= API 23 (M), so this is always available
         return powerManager.isIgnoringBatteryOptimizations(packageName)
     }
 
-    // ========================================================================
-    // Settings Intent Launchers
-    // ========================================================================
-
-    /**
-     * Open accessibility settings
-     */
-    private fun openAccessibilitySettings() {
-        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-        startActivity(intent)
-    }
-
-    /**
-     * Open notification listener settings
-     */
-    private fun openNotificationListenerSettings() {
-        val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-        startActivity(intent)
-    }
-
-    /**
-     * Open battery optimization settings
-     */
-    private fun openBatteryOptimizationSettings() {
-        // minSdk is 24, which is >= API 23 (M), so this is always available
-        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-            data = Uri.parse("package:$packageName")
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_CODE_POST_NOTIFICATIONS)
+            }
         }
-        startActivity(intent)
     }
 
-    /**
-     * Open app-specific settings
-     */
-    private fun openAppSettings() {
-        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-            data = Uri.parse("package:$packageName")
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_CODE_POST_NOTIFICATIONS) {
+            updateAllPermissionStatus()
         }
-        startActivity(intent)
     }
 }
-
-/**
- * Container for permission view components
- */
-private data class PermissionView(
-    val container: LinearLayout,
-    val statusIndicator: TextView,
-    val actionButton: Button
-)

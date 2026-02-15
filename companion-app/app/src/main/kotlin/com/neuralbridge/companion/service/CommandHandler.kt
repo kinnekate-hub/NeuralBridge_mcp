@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.util.Log
 import com.neuralbridge.companion.gesture.GestureEngine
 import com.neuralbridge.companion.input.InputEngine
+import com.neuralbridge.companion.log.CommandLog
 import com.neuralbridge.companion.uitree.UiTreeWalker
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
@@ -128,13 +129,19 @@ class CommandHandler(
 
             // Add latency to response
             val latencyMs = System.currentTimeMillis() - startTime
-            response.toBuilder()
+            val finalResponse = response.toBuilder()
                 .setLatencyMs(latencyMs)
                 .build()
+
+            // Log command execution
+            logCommand(request.commandCase.name, latencyMs.toInt(), finalResponse.success)
+
+            finalResponse
 
         } catch (e: Exception) {
             Log.e(TAG, "Error handling request: $requestId", e)
             val latencyMs = System.currentTimeMillis() - startTime
+            logCommand(request.commandCase.name, latencyMs.toInt(), false)
             buildErrorResponse(
                 requestId = requestId,
                 errorCode = Neuralbridge.ErrorCode.ERROR_UNSPECIFIED,
@@ -142,6 +149,32 @@ class CommandHandler(
                 latencyMs = latencyMs
             )
         }
+    }
+
+    private fun logCommand(commandName: String, latencyMs: Int, success: Boolean) {
+        val category = when {
+            commandName.contains("TAP") || commandName.contains("SWIPE") ||
+            commandName.contains("PRESS") || commandName.contains("DRAG") ||
+            commandName.contains("FLING") || commandName.contains("PINCH") ||
+            commandName.contains("DOUBLE") -> CommandLog.Category.GESTURE
+            commandName.contains("UI_TREE") || commandName.contains("SCREENSHOT") ||
+            commandName.contains("FIND") || commandName.contains("FOREGROUND") ||
+            commandName.contains("NOTIFICATION") -> CommandLog.Category.OBSERVE
+            commandName.contains("LAUNCH") || commandName.contains("CLOSE") ||
+            commandName.contains("OPEN") || commandName.contains("CLIPBOARD") ||
+            commandName.contains("ENABLE") -> CommandLog.Category.MANAGE
+            commandName.contains("WAIT") || commandName.contains("IDLE") ||
+            commandName.contains("GONE") -> CommandLog.Category.WAIT
+            commandName.contains("INPUT") || commandName.contains("TEXT") -> CommandLog.Category.INPUT
+            else -> CommandLog.Category.MANAGE
+        }
+        CommandLog.add(CommandLog.Entry(
+            timestamp = System.currentTimeMillis(),
+            command = commandName.lowercase().replace("_", "_"),
+            latencyMs = latencyMs,
+            success = success,
+            category = category
+        ))
     }
 
     /**

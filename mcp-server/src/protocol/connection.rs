@@ -275,25 +275,45 @@ impl DeviceConnection {
     }
 
     /// Check if connection is still alive
+    ///
+    /// Uses both peek (read check) and write (write check) to detect dead connections.
+    /// This is important because ADB port forwarding may not propagate TCP resets promptly.
     pub async fn is_alive(&self) -> bool {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
 
-        // Use peek() with timeout to avoid blocking on idle connections
+        // First: try peek to check for EOF or error
         let mut peek_buf = [0u8; 1];
         match tokio::time::timeout(
-            Duration::from_millis(100),
+            Duration::from_millis(50),
             inner.stream.peek(&mut peek_buf)
         ).await {
             Ok(Ok(0)) => {
                 debug!("Connection closed (EOF)");
-                false
+                return false;
             }
-            Ok(Ok(_)) => true,  // Data available = alive
+            Ok(Ok(_)) => return true,  // Data available = definitely alive
             Ok(Err(_)) => {
-                debug!("Connection health check failed");
-                false
+                debug!("Connection health check failed (peek error)");
+                return false;
             }
-            Err(_) => true,  // Timeout = alive but idle (no data to peek)
+            Err(_) => {
+                // Timeout on peek = no data waiting. Try a zero-byte write to verify
+                // the socket is still writable (detects broken pipe through ADB forwarding)
+                match tokio::time::timeout(
+                    Duration::from_millis(50),
+                    inner.stream.write_all(&[])
+                ).await {
+                    Ok(Ok(())) => true,  // Write succeeded = alive
+                    Ok(Err(e)) => {
+                        debug!("Connection health check failed (write error: {})", e);
+                        false
+                    }
+                    Err(_) => {
+                        debug!("Connection health check timed out on write");
+                        false  // If write times out, assume dead (conservative)
+                    }
+                }
+            }
         }
     }
 }

@@ -14,7 +14,7 @@ from demo_client.scenarios.scenario_1_basics import run_scenario_1_basics
 
 async def main():
     mcp_server_path = Path("../mcp-server/target/release/neuralbridge-mcp").resolve()
-    device_id = "emulator-5554"
+    device_id = "344656504e303098"
     screenshot_dir = Path("../screenshots").resolve()
     screenshot_dir.mkdir(parents=True, exist_ok=True)
 

@@ -41,25 +41,19 @@ class ScreenshotConsentActivity : Activity() {
          * Check if consent result is available
          */
         fun hasConsentResult(): Boolean {
-            return pendingResultCode != null && pendingResultData != null
+            return pendingResultCode != null
         }
 
         /**
          * Get consent result and clear it
          * @return Pair of (resultCode, resultData) or null if not available
          */
-        fun consumeConsentResult(): Pair<Int, Intent>? {
-            val code = pendingResultCode
+        fun consumeConsentResult(): Pair<Int, Intent?>? {
+            val code = pendingResultCode ?: return null
             val data = pendingResultData
-
-            if (code != null && data != null) {
-                // Clear after consuming
-                pendingResultCode = null
-                pendingResultData = null
-                return Pair(code, data)
-            }
-
-            return null
+            pendingResultCode = null
+            pendingResultData = null
+            return Pair(code, data)
         }
 
         /**

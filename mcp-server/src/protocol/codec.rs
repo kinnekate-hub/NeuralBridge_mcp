@@ -17,7 +17,7 @@
  */
 
 use anyhow::{Result, Context, bail};
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
 use prost::Message;
 use tracing::{debug, trace};
 
@@ -179,6 +179,31 @@ impl MessageFramer {
         self.buffer.extend_from_slice(data);
     }
 
+    /// Try to realign buffer by searching for magic bytes
+    ///
+    /// When invalid magic is detected, scans forward up to 256 bytes looking for
+    /// valid 0x4E42 magic bytes. If found, discards corrupted data and realigns.
+    ///
+    /// Returns true if realignment succeeded, false if no valid magic found.
+    fn try_realign_buffer(&mut self) -> bool {
+        const MAX_SCAN_BYTES: usize = 256;
+        let scan_limit = std::cmp::min(self.buffer.len(), MAX_SCAN_BYTES);
+
+        // Search for magic bytes starting at position 1
+        for i in 1..scan_limit - 1 {
+            let magic = u16::from_be_bytes([self.buffer[i], self.buffer[i + 1]]);
+            if magic == MAGIC {
+                debug!("Found magic bytes at offset {}, discarding {} corrupted bytes", i, i);
+                // Discard corrupted data before the magic
+                self.buffer.advance(i);
+                return true;
+            }
+        }
+
+        debug!("Buffer realignment failed: no magic bytes found in first {} bytes", scan_limit);
+        false
+    }
+
     /// Try to extract a complete message from the buffer
     ///
     /// Returns Some((header, payload_bytes)) if a complete message is available,
@@ -189,8 +214,24 @@ impl MessageFramer {
             return Ok(None);
         }
 
-        // Decode header
-        let header = MessageHeader::decode(&self.buffer[..])?;
+        // Try to decode header
+        let header = match MessageHeader::decode(&self.buffer[..]) {
+            Ok(h) => h,
+            Err(e) => {
+                // Header decode failed - try buffer realignment
+                debug!("Header decode failed: {}. Attempting buffer realignment...", e);
+                if self.try_realign_buffer() {
+                    // Retry header decode after realignment
+                    if self.buffer.len() < MessageHeader::SIZE {
+                        return Ok(None);
+                    }
+                    MessageHeader::decode(&self.buffer[..])?
+                } else {
+                    // Realignment failed - propagate original error
+                    return Err(e);
+                }
+            }
+        };
 
         // Check if full message is available
         let total_size = MessageHeader::SIZE + header.payload_length as usize;

@@ -70,6 +70,9 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     private val eventsEnabled = AtomicBoolean(false)
     private val lastEventTime = AtomicLong(0)
 
+    // Track service start time
+    private var startTime: Long = 0L
+
     /**
      * Service connected - called when AccessibilityService is bound
      */
@@ -79,6 +82,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
 
         // Set static instance
         instance = this
+        startTime = System.currentTimeMillis()
 
         // Configure accessibility service
         configureAccessibilityService()
@@ -186,6 +190,22 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
                 updateNotificationForFastScreenshots()
             } else {
                 Log.w(TAG, "MediaProjection permission denied - using ADB fallback for screenshots")
+            }
+        }
+    }
+
+    /**
+     * Try to consume any pending MediaProjection consent result.
+     * Called from MainActivity.onResume() after user grants consent via Setup tab.
+     */
+    fun tryConsumeMediaProjectionConsent() {
+        if (screenshotPipeline.hasMediaProjectionPermission()) return
+        if (!com.neuralbridge.companion.screenshot.ScreenshotConsentActivity.hasConsentResult()) return
+        serviceScope.launch {
+            val granted = screenshotPipeline.requestMediaProjectionPermission()
+            if (granted) {
+                Log.i(TAG, "MediaProjection permission granted from UI - fast screenshots enabled")
+                updateNotificationForFastScreenshots()
             }
         }
     }
@@ -379,6 +399,27 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     fun setEventsEnabled(enabled: Boolean) {
         eventsEnabled.set(enabled)
         Log.i(TAG, "Event streaming ${if (enabled) "enabled" else "disabled"}")
+    }
+
+    /**
+     * Get number of active TCP connections
+     */
+    fun getConnectionCount(): Int {
+        return if (::tcpServer.isInitialized) tcpServer.getActiveConnectionCount() else 0
+    }
+
+    /**
+     * Get service uptime in milliseconds
+     */
+    fun getUptime(): Long {
+        return if (startTime > 0) System.currentTimeMillis() - startTime else 0
+    }
+
+    /**
+     * Check if MediaProjection permission is granted
+     */
+    fun hasMediaProjectionPermission(): Boolean {
+        return if (::screenshotPipeline.isInitialized) screenshotPipeline.hasMediaProjectionPermission() else false
     }
 
     /**

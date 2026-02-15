@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 # MCP SDK - requires server + transport-io for stdio, macros for #[tool]
-rmcp = { version = "0.13", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "0.15", features = ["server", "transport-io", "macros"] }
 schemars = { version = "1.0", features = ["chrono04"] }
 
 # Async runtime
@@ -36,6 +36,7 @@ futures = "0.3"
 async-trait = "0.1"
 uuid = { version = "1.6", features = ["v4"] }
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [build-dependencies]
 prost-build = "0.12"
