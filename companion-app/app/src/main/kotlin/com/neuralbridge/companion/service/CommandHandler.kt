@@ -323,7 +323,8 @@ class CommandHandler(
             buildErrorResponse(
                 requestId = requestId,
                 errorCode = Neuralbridge.ErrorCode.GESTURE_FAILED,
-                errorMessage = "Tap gesture failed or was cancelled"
+                errorMessage = "Tap gesture failed or was cancelled at (${point.x}, ${point.y}). " +
+                        "The gesture may have been intercepted by the system or the coordinates may be outside the visible area."
             )
         }
     }
@@ -616,15 +617,9 @@ class CommandHandler(
     ): Neuralbridge.Response {
         Log.d(TAG, "Inputting text: ${request.text.length} chars, append=${request.append}")
 
-        // Find target element
-        val rootNode = accessibilityService.rootInActiveWindow
-        if (rootNode == null) {
-            return buildErrorResponse(
-                requestId = requestId,
-                errorCode = Neuralbridge.ErrorCode.ERROR_UNSPECIFIED,
-                errorMessage = "No active window available"
-            )
-        }
+        var tapX = 0
+        var tapY = 0
+        var targetNode: android.view.accessibility.AccessibilityNodeInfo? = null
 
         // If selector or coordinates specified, tap first to focus the element
         if (request.targetCase == Neuralbridge.InputTextRequest.TargetCase.SELECTOR) {
@@ -632,11 +627,13 @@ class CommandHandler(
             if (!resolved.success) {
                 return resolved.error!!
             }
+            tapX = resolved.centerPoint!!.x
+            tapY = resolved.centerPoint!!.y
             // Tap to focus
             val tapSuccess = executeGestureAndWait {
                 gestureEngine.executeTap(
-                    x = resolved.centerPoint!!.x.toFloat(),
-                    y = resolved.centerPoint!!.y.toFloat(),
+                    x = tapX.toFloat(),
+                    y = tapY.toFloat(),
                     callback = it
                 )
             }
@@ -644,17 +641,19 @@ class CommandHandler(
                 return buildErrorResponse(
                     requestId = requestId,
                     errorCode = Neuralbridge.ErrorCode.GESTURE_FAILED,
-                    errorMessage = "Failed to tap element for input"
+                    errorMessage = "Failed to tap element for input at ($tapX, $tapY)"
                 )
             }
-            // Wait a bit for focus to settle
-            kotlinx.coroutines.delay(100)
+            // Wait for focus to settle (polls every 50ms, up to 500ms)
+            targetNode = waitForFocus()
         } else if (request.targetCase == Neuralbridge.InputTextRequest.TargetCase.COORDINATES) {
+            tapX = request.coordinates.x
+            tapY = request.coordinates.y
             // Tap to focus
             val tapSuccess = executeGestureAndWait {
                 gestureEngine.executeTap(
-                    x = request.coordinates.x.toFloat(),
-                    y = request.coordinates.y.toFloat(),
+                    x = tapX.toFloat(),
+                    y = tapY.toFloat(),
                     callback = it
                 )
             }
@@ -662,43 +661,69 @@ class CommandHandler(
                 return buildErrorResponse(
                     requestId = requestId,
                     errorCode = Neuralbridge.ErrorCode.GESTURE_FAILED,
-                    errorMessage = "Failed to tap element for input"
+                    errorMessage = "Failed to tap element for input at ($tapX, $tapY)"
                 )
             }
-            // Wait a bit for focus to settle
-            kotlinx.coroutines.delay(100)
+            // Wait for focus to settle (polls every 50ms, up to 500ms)
+            targetNode = waitForFocus()
+        } else {
+            // Use currently focused element
+            val rootNode = accessibilityService.rootInActiveWindow
+            if (rootNode != null) {
+                targetNode = rootNode.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+                rootNode.recycle()
+            }
         }
 
-        // Now get the focused element
-        val targetNode = rootNode.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
-
         if (targetNode == null) {
+            val coordInfo = if (request.targetCase == Neuralbridge.InputTextRequest.TargetCase.SELECTOR ||
+                                 request.targetCase == Neuralbridge.InputTextRequest.TargetCase.COORDINATES) {
+                " after tap at ($tapX, $tapY)"
+            } else {
+                ""
+            }
             return buildErrorResponse(
                 requestId = requestId,
                 errorCode = Neuralbridge.ErrorCode.ELEMENT_NOT_FOUND,
-                errorMessage = "No editable element found. Tap an input field first or use a selector."
+                errorMessage = "No input field gained focus within 500ms$coordInfo. Verify coordinates target an editable field."
             )
         }
 
-        // Input text
-        val success = inputEngine.inputText(
-            element = targetNode,
-            text = request.text,
-            append = request.append
-        )
+        return try {
+            // Check if element is editable before attempting input
+            if (!targetNode.isEditable) {
+                val className = targetNode.className?.toString() ?: "unknown"
+                val text = targetNode.text?.toString() ?: ""
+                return buildErrorResponse(
+                    requestId = requestId,
+                    errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
+                    errorMessage = "Element is not editable. Target: $className, text='$text'. Use find_elements to locate an EditText field."
+                )
+            }
 
-        return if (success) {
-            Neuralbridge.Response.newBuilder()
-                .setRequestId(requestId)
-                .setSuccess(true)
-                .setEmpty(Neuralbridge.EmptyResult.getDefaultInstance())
-                .build()
-        } else {
-            buildErrorResponse(
-                requestId = requestId,
-                errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
-                errorMessage = "Failed to input text into element"
+            // Input text
+            val success = inputEngine.inputText(
+                element = targetNode,
+                text = request.text,
+                append = request.append
             )
+
+            if (success) {
+                Neuralbridge.Response.newBuilder()
+                    .setRequestId(requestId)
+                    .setSuccess(true)
+                    .setEmpty(Neuralbridge.EmptyResult.getDefaultInstance())
+                    .build()
+            } else {
+                val resourceId = targetNode.viewIdResourceName ?: "unknown"
+                buildErrorResponse(
+                    requestId = requestId,
+                    errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
+                    errorMessage = "Clipboard paste failed on element $resourceId. App may restrict clipboard access."
+                )
+            }
+        } finally {
+            targetNode.recycle()
         }
     }
 
@@ -763,7 +788,9 @@ class CommandHandler(
     /**
      * Handle press_key request
      *
-     * Injects key event or performs global action
+     * Injects key event or performs global action.
+     * Re-acquires rootInActiveWindow and focused node immediately before action
+     * to avoid stale node issues.
      */
     private suspend fun handlePressKey(
         requestId: String,
@@ -771,107 +798,188 @@ class CommandHandler(
     ): Neuralbridge.Response {
         Log.d(TAG, "Pressing key: ${request.keyCode}")
 
-        // Map KeyCode to Android key event or global action
-        val success = when (request.keyCode) {
+        // Handle global action keys directly (no focused element needed)
+        when (request.keyCode) {
             Neuralbridge.KeyCode.BACK -> {
-                accessibilityService.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+                val success = accessibilityService.performGlobalAction(
+                    android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK
+                )
+                return if (success) {
+                    Neuralbridge.Response.newBuilder()
+                        .setRequestId(requestId)
+                        .setSuccess(true)
+                        .setEmpty(Neuralbridge.EmptyResult.getDefaultInstance())
+                        .build()
+                } else {
+                    buildErrorResponse(
+                        requestId = requestId,
+                        errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
+                        errorMessage = "BACK global action failed"
+                    )
+                }
             }
             Neuralbridge.KeyCode.HOME -> {
-                accessibilityService.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
+                val success = accessibilityService.performGlobalAction(
+                    android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME
+                )
+                return if (success) {
+                    Neuralbridge.Response.newBuilder()
+                        .setRequestId(requestId)
+                        .setSuccess(true)
+                        .setEmpty(Neuralbridge.EmptyResult.getDefaultInstance())
+                        .build()
+                } else {
+                    buildErrorResponse(
+                        requestId = requestId,
+                        errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
+                        errorMessage = "HOME global action failed"
+                    )
+                }
             }
             Neuralbridge.KeyCode.MENU -> {
-                // Menu key - not supported via accessibility service
                 Log.w(TAG, "MENU key not supported via AccessibilityService")
-                false
+                return buildErrorResponse(
+                    requestId = requestId,
+                    errorCode = Neuralbridge.ErrorCode.UNSUPPORTED_OPERATION,
+                    errorMessage = "MENU key not supported via AccessibilityService"
+                )
             }
             else -> {
-                // For other keys (ENTER, DELETE, TAB, SPACE, etc.)
-                // These are typically handled as actions on focused element
-                val rootNode = accessibilityService.rootInActiveWindow
-                if (rootNode != null) {
-                    val focusedNode = rootNode.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
-                    if (focusedNode != null) {
-                        // Handle specific keys - must return boolean
-                        when (request.keyCode) {
-                            Neuralbridge.KeyCode.ENTER -> {
-                                // Enter key - try IME action first (for single-line fields), then newline
-                                // Check if field supports IME action (e.g., "Done", "Go", "Send")
-                                val actions = focusedNode.actionList
-                                val hasImeAction = actions.any {
-                                    it.id == android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
-                                }
-
-                                val result = if (hasImeAction) {
-                                    // Single-line field with IME action - perform it
-                                    val imeResult = focusedNode.performAction(
-                                        android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
-                                    )
-                                    Log.d(TAG, "ENTER key: performed IME action, result=$imeResult")
-                                    imeResult
-                                } else {
-                                    // Multi-line field or no IME action - add newline
-                                    val currentText = focusedNode.text?.toString() ?: ""
-                                    val newText = currentText + "\n"
-                                    val args = Bundle().apply {
-                                        putCharSequence(
-                                            android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                                            newText
-                                        )
-                                    }
-                                    val setTextResult = focusedNode.performAction(
-                                        android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,
-                                        args
-                                    )
-                                    Log.d(TAG, "ENTER key: added newline, result=$setTextResult")
-                                    setTextResult
-                                }
-                                result
-                            }
-                            Neuralbridge.KeyCode.DELETE -> {
-                                // Delete key - backspace (ACTION_DELETE or clear selection)
-                                val text = focusedNode.text?.toString() ?: ""
-                                if (text.isNotEmpty()) {
-                                    val newText = text.dropLast(1)
-                                    val args = Bundle().apply {
-                                        putCharSequence(
-                                            android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                                            newText
-                                        )
-                                    }
-                                    focusedNode.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-                                } else {
-                                    false
-                                }
-                            }
-                            else -> {
-                                // For other keys, return false (unsupported)
-                                Log.w(TAG, "Key code not yet supported: ${request.keyCode}")
-                                false
-                            }
-                        }
-                    } else {
-                        Log.w(TAG, "No focused element for key press")
-                        false
-                    }
-                } else {
-                    Log.w(TAG, "No active window for key press")
-                    false
-                }
+                // Keys requiring focused element - handled below
             }
         }
 
-        return if (success) {
-            Neuralbridge.Response.newBuilder()
-                .setRequestId(requestId)
-                .setSuccess(true)
-                .setEmpty(Neuralbridge.EmptyResult.getDefaultInstance())
-                .build()
-        } else {
-            buildErrorResponse(
+        // For keys requiring a focused element (ENTER, DELETE, TAB, SPACE, etc.):
+        // Re-acquire rootInActiveWindow fresh to avoid stale node issues
+        val rootNode = accessibilityService.rootInActiveWindow
+        if (rootNode == null) {
+            return buildErrorResponse(
                 requestId = requestId,
                 errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
-                errorMessage = "Key press failed: ${request.keyCode}"
+                errorMessage = "No active window available for key press. Device may be locked or transitioning."
             )
+        }
+
+        // Re-acquire focused node from fresh root
+        val focusedNode = rootNode.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+        if (focusedNode == null) {
+            rootNode.recycle()
+            return buildErrorResponse(
+                requestId = requestId,
+                errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
+                errorMessage = "No focused input element for ${request.keyCode} key. Tap an input field first using android_tap."
+            )
+        }
+
+        // Refresh node to ensure it's not stale (API 18+)
+        focusedNode.refresh()
+
+        return try {
+            when (request.keyCode) {
+            Neuralbridge.KeyCode.ENTER -> {
+                // Enter key - try IME action first (for single-line fields), then newline
+                val actions = focusedNode.actionList
+                val hasImeAction = actions.any {
+                    it.id == android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
+                }
+
+                if (hasImeAction) {
+                    // Single-line field with IME action - perform it
+                    val imeResult = focusedNode.performAction(
+                        android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
+                    )
+                    Log.d(TAG, "ENTER key: performed IME action, result=$imeResult")
+                    if (imeResult) {
+                        Neuralbridge.Response.newBuilder()
+                            .setRequestId(requestId)
+                            .setSuccess(true)
+                            .setEmpty(Neuralbridge.EmptyResult.getDefaultInstance())
+                            .build()
+                    } else {
+                        val resourceId = focusedNode.viewIdResourceName ?: "unknown"
+                        buildErrorResponse(
+                            requestId = requestId,
+                            errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
+                            errorMessage = "IME ENTER action failed on element $resourceId. Field may not support IME actions."
+                        )
+                    }
+                } else {
+                    // Multi-line field or no IME action - add newline
+                    val currentText = focusedNode.text?.toString() ?: ""
+                    val newText = currentText + "\n"
+                    val args = Bundle().apply {
+                        putCharSequence(
+                            android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                            newText
+                        )
+                    }
+                    val setTextResult = focusedNode.performAction(
+                        android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,
+                        args
+                    )
+                    Log.d(TAG, "ENTER key: added newline, result=$setTextResult")
+                    if (setTextResult) {
+                        Neuralbridge.Response.newBuilder()
+                            .setRequestId(requestId)
+                            .setSuccess(true)
+                            .setEmpty(Neuralbridge.EmptyResult.getDefaultInstance())
+                            .build()
+                    } else {
+                        val resourceId = focusedNode.viewIdResourceName ?: "unknown"
+                        buildErrorResponse(
+                            requestId = requestId,
+                            errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
+                            errorMessage = "Failed to insert newline on element $resourceId. Field may not support text modification."
+                        )
+                    }
+                }
+            }
+            Neuralbridge.KeyCode.DELETE -> {
+                val text = focusedNode.text?.toString() ?: ""
+                if (text.isNotEmpty()) {
+                    val newText = text.dropLast(1)
+                    val args = Bundle().apply {
+                        putCharSequence(
+                            android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                            newText
+                        )
+                    }
+                    val result = focusedNode.performAction(
+                        android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, args
+                    )
+                    if (result) {
+                        Neuralbridge.Response.newBuilder()
+                            .setRequestId(requestId)
+                            .setSuccess(true)
+                            .setEmpty(Neuralbridge.EmptyResult.getDefaultInstance())
+                            .build()
+                    } else {
+                        buildErrorResponse(
+                            requestId = requestId,
+                            errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
+                            errorMessage = "DELETE action failed on element ${focusedNode.viewIdResourceName ?: "unknown"}."
+                        )
+                    }
+                } else {
+                    buildErrorResponse(
+                        requestId = requestId,
+                        errorCode = Neuralbridge.ErrorCode.INPUT_FAILED,
+                        errorMessage = "DELETE failed: text field is already empty."
+                    )
+                }
+            }
+            else -> {
+                Log.w(TAG, "Key code not yet supported: ${request.keyCode}")
+                buildErrorResponse(
+                    requestId = requestId,
+                    errorCode = Neuralbridge.ErrorCode.UNSUPPORTED_OPERATION,
+                    errorMessage = "Key code not yet supported: ${request.keyCode}. Supported keys: BACK, HOME, ENTER, DELETE."
+                )
+            }
+            }
+        } finally {
+            rootNode.recycle()
+            focusedNode.recycle()
         }
     }
 
@@ -1601,6 +1709,30 @@ class CommandHandler(
 
         // Execute gesture with callback
         executor(callback)
+    }
+
+    /**
+     * Wait for an input field to gain focus after a tap gesture.
+     *
+     * Polls rootInActiveWindow.findFocus(FOCUS_INPUT) every 50ms until
+     * a focused node is found or timeout expires.
+     *
+     * @param timeoutMs Maximum time to wait (default 500ms)
+     * @return The focused AccessibilityNodeInfo, or null if timeout
+     */
+    private suspend fun waitForFocus(timeoutMs: Long = 500): android.view.accessibility.AccessibilityNodeInfo? {
+        val startTime = System.currentTimeMillis()
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            val root = accessibilityService.rootInActiveWindow
+            if (root != null) {
+                val focused = root.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+                // Always recycle root since we don't return it
+                root.recycle()
+                if (focused != null) return focused
+            }
+            kotlinx.coroutines.delay(50)
+        }
+        return null
     }
 
     /**

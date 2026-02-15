@@ -20,6 +20,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tracing::{info, warn, error, debug};
 use uuid::Uuid;
@@ -42,14 +43,113 @@ pub struct AppState {
     connection: Arc<RwLock<Option<DeviceConnection>>>,
     device_id: Arc<RwLock<Option<String>>>,
     event_buffer: Arc<RwLock<VecDeque<pb::Event>>>,
+    auto_enable_permissions: AtomicBool,
+    permissions_checked: AtomicBool,
 }
 
-// Helper to convert anyhow errors to MCP errors
+// Helper to convert anyhow errors to MCP errors with detailed classification
 fn to_mcp_error(e: anyhow::Error) -> McpError {
+    let error_msg = e.to_string().to_lowercase();
+
+    // Classify connection errors
+    if error_msg.contains("connection refused")
+        || error_msg.contains("connection timeout")
+        || error_msg.contains("connection reset")
+        || error_msg.contains("no route to host")
+    {
+        let msg = format!(
+            "Failed to connect to companion app: {}\n\
+            \n\
+            Troubleshooting checklist:\n\
+            1. Check companion app is installed and running\n\
+            2. Verify AccessibilityService is enabled in Settings\n\
+            3. Run: adb forward tcp:38472 tcp:38472\n\
+            4. Check logcat: adb logcat -s NeuralBridge:V",
+            e
+        );
+        return McpError::new(ErrorCode::INTERNAL_ERROR, msg, None);
+    }
+
+    // Classify permission errors
+    if error_msg.contains("permission denied") || error_msg.contains("unauthorized") {
+        let msg = format!(
+            "Permission denied: {}\n\
+            \n\
+            Troubleshooting checklist:\n\
+            1. Accept authorization prompt on device screen\n\
+            2. Check USB debugging is enabled\n\
+            3. Run: adb devices (device should show 'device', not 'unauthorized')\n\
+            4. Try: adb kill-server && adb start-server",
+            e
+        );
+        return McpError::new(ErrorCode::INTERNAL_ERROR, msg, None);
+    }
+
+    // Classify device state errors
+    if error_msg.contains("device offline") || error_msg.contains("device not responding") {
+        let msg = format!(
+            "Device is offline or not responding: {}\n\
+            \n\
+            Troubleshooting checklist:\n\
+            1. Check device is powered on and unlocked\n\
+            2. Check USB cable connection\n\
+            3. Run: adb devices\n\
+            4. Try: adb reconnect",
+            e
+        );
+        return McpError::new(ErrorCode::INTERNAL_ERROR, msg, None);
+    }
+
+    // Classify ADB errors
+    if error_msg.contains("adb") || error_msg.contains("device not found") {
+        let msg = format!(
+            "ADB operation failed: {}\n\
+            \n\
+            Troubleshooting checklist:\n\
+            1. Run: adb devices\n\
+            2. Check device is connected and authorized\n\
+            3. Verify ADB is in PATH\n\
+            4. Try: adb kill-server && adb start-server",
+            e
+        );
+        return McpError::new(ErrorCode::INTERNAL_ERROR, msg, None);
+    }
+
+    // Classify "no device selected" errors
+    if error_msg.contains("no device selected") {
+        let msg = format!(
+            "{}\n\
+            \n\
+            Please specify a device:\n\
+            - Use --device <id> flag\n\
+            - Or use --auto-discover to auto-select first device",
+            e
+        );
+        return McpError::new(ErrorCode::INVALID_PARAMS, msg, None);
+    }
+
+    // Classify port forwarding errors
+    if error_msg.contains("port forwarding") {
+        let msg = format!(
+            "Port forwarding setup failed: {}\n\
+            \n\
+            Troubleshooting checklist:\n\
+            1. Check device is online: adb devices\n\
+            2. Manually test: adb forward tcp:38472 tcp:38472\n\
+            3. Check for port conflicts: netstat -an | grep 38472\n\
+            4. Try: adb forward --remove-all",
+            e
+        );
+        return McpError::new(ErrorCode::INTERNAL_ERROR, msg, None);
+    }
+
+    // Default: generic error
     McpError::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None)
 }
 
+
 // Helper to validate selector has at least one non-empty field or boolean filter
+#[allow(clippy::too_many_arguments)]
 fn validate_selector(
     text: Option<&String>,
     resource_id: Option<&String>,
@@ -86,6 +186,63 @@ fn validate_selector(
     Ok(())
 }
 
+// Retry helper for transient failures
+async fn retry_on_transient(
+    conn: &DeviceConnection,
+    request: Request,
+    max_retries: u32,
+) -> Result<pb::Response> {
+    let mut last_error = None;
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            debug!("Retry attempt {} after 200ms delay", attempt);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        // Clone request for retry (request_id stays the same for correlation)
+        let req = Request {
+            request_id: request.request_id.clone(),
+            command: request.command.clone(),
+        };
+
+        match conn.send_request(req).await {
+            Ok(response) => {
+                // Check if error is retryable
+                if response.success {
+                    return Ok(response);
+                }
+
+                let is_retryable = response.error_code == pb::ErrorCode::ElementNotFound as i32;
+
+                if is_retryable && attempt < max_retries {
+                    debug!("Retryable error (code={}): {}", response.error_code, response.error_message);
+                    last_error = Some(anyhow::anyhow!("{}", response.error_message));
+                    continue;
+                }
+
+                // Non-retryable error or final attempt - return response
+                return Ok(response);
+            }
+            Err(e) => {
+                // Connection errors are retryable
+                if (e.to_string().contains("timeout") || e.to_string().contains("connection"))
+                    && attempt < max_retries
+                {
+                    debug!("Connection error, will retry: {}", e);
+                    last_error = Some(e);
+                    continue;
+                }
+                // Non-retryable error or final attempt
+                return Err(e);
+            }
+        }
+    }
+
+    // This should never be reached, but just in case
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Max retries exceeded")))
+}
+
 impl AppState {
     pub fn new(device_manager: DeviceManager) -> Self {
         Self {
@@ -93,7 +250,70 @@ impl AppState {
             connection: Arc::new(RwLock::new(None)),
             device_id: Arc::new(RwLock::new(None)),
             event_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
+            auto_enable_permissions: AtomicBool::new(false),
+            permissions_checked: AtomicBool::new(false),
         }
+    }
+
+    /// Check if companion app is ready with required permissions
+    ///
+    /// Returns error if permissions are missing. If auto_enable is true,
+    /// attempts to enable missing permissions automatically.
+    /// Caches successful permission checks to avoid redundant ADB calls.
+    async fn check_companion_ready(&self, auto_enable: bool) -> Result<()> {
+        // Check cache first - if permissions were already verified, skip check
+        if self.permissions_checked.load(Ordering::SeqCst) {
+            debug!("Permissions already verified (cached), skipping check");
+            return Ok(());
+        }
+
+        let device_id = self.device_id.read().await;
+        let device_id_str = device_id.as_ref()
+            .context("No device selected. Use --device or --auto-discover")?;
+
+        debug!("Checking companion app permissions on device: {}", device_id_str);
+
+        // Check current permissions
+        let status = self.device_manager.check_permissions(device_id_str).await
+            .context("Failed to check companion app permissions")?;
+
+        // If not ready and auto-enable is requested, try to enable
+        if !status.is_ready() && auto_enable {
+            info!("Auto-enabling missing permissions...");
+
+            if !status.accessibility_enabled {
+                self.device_manager.enable_accessibility_service(device_id_str).await
+                    .context("Failed to enable AccessibilityService")?;
+            }
+
+            if !status.notification_listener_enabled {
+                self.device_manager.enable_notification_listener(device_id_str).await
+                    .context("Failed to enable NotificationListenerService")?;
+            }
+
+            // Re-check after enabling
+            let new_status = self.device_manager.check_permissions(device_id_str).await
+                .context("Failed to re-check permissions after auto-enable")?;
+
+            if !new_status.is_ready() {
+                if let Some(msg) = new_status.missing_permissions_message() {
+                    anyhow::bail!("{}", msg);
+                }
+            }
+        } else if !status.is_ready() {
+            // Not ready and auto-enable not requested
+            if let Some(msg) = status.missing_permissions_message() {
+                anyhow::bail!(
+                    "{}\n\nUse --enable-permissions flag to auto-enable missing permissions",
+                    msg
+                );
+            }
+        }
+
+        // Cache successful permission check
+        self.permissions_checked.store(true, Ordering::SeqCst);
+
+        Ok(())
     }
 
     pub async fn get_connection(&self) -> Result<DeviceConnection> {
@@ -115,11 +335,16 @@ impl AppState {
 
         info!("Establishing new connection to device: {}", device_id_str);
 
+        // Pre-flight check: verify companion app permissions
+        let auto_enable = self.auto_enable_permissions.load(Ordering::SeqCst);
+        self.check_companion_ready(auto_enable).await
+            .context("Companion app not ready")?;
+
         // Set up ADB port forwarding
         self.device_manager.setup_port_forwarding(device_id_str).await
             .context("Failed to set up ADB port forwarding")?;
 
-        // Establish TCP connection
+        // Establish TCP connection (with automatic retry logic)
         let new_conn = DeviceConnection::connect().await
             .context("Failed to connect to companion app")?;
 
@@ -777,6 +1002,9 @@ impl NeuralBridgeServer {
         let conn = self.state.get_connection().await
             .map_err(to_mcp_error)?;
 
+        // Check if using coordinates (no retry) or selector (with retry)
+        let use_selector = params.x.is_none() || params.y.is_none();
+
         // Build target (coordinates or selector)
         let target = if let (Some(x), Some(y)) = (params.x, params.y) {
             Some(pb::tap_request::Target::Coordinates(pb::Point { x, y }))
@@ -816,9 +1044,12 @@ impl NeuralBridgeServer {
             command: Some(Command::Tap(pb::TapRequest { target })),
         };
 
-        // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        // Send and await response (with retry for selector-based taps only)
+        let response = if use_selector {
+            retry_on_transient(&conn, request, 1).await
+        } else {
+            conn.send_request(request).await
+        }.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -1265,8 +1496,8 @@ impl NeuralBridgeServer {
             })),
         };
 
-        // Send and await response
-        let response = conn.send_request(request).await
+        // Send and await response (with retry on transient failures)
+        let response = retry_on_transient(&conn, request, 1).await
             .map_err(to_mcp_error)?;
 
         // Check success
@@ -1332,8 +1563,8 @@ impl NeuralBridgeServer {
             })),
         };
 
-        // Send and await response
-        let response = conn.send_request(request).await
+        // Send and await response (with retry on transient failures)
+        let response = retry_on_transient(&conn, request, 1).await
             .map_err(to_mcp_error)?;
 
         // Check success
@@ -1923,6 +2154,7 @@ async fn main() -> Result<()> {
     let mut device_id: Option<String> = None;
     let mut auto_discover = false;
     let mut check_mode = false;
+    let mut enable_permissions = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -1938,6 +2170,7 @@ async fn main() -> Result<()> {
             }
             "--auto-discover" => auto_discover = true,
             "--check" => check_mode = true,
+            "--enable-permissions" => enable_permissions = true,
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());
@@ -1969,7 +2202,7 @@ async fn main() -> Result<()> {
     }
 
     if check_mode {
-        return run_check_mode(&device_manager, device_id.as_deref()).await;
+        return run_check_mode(&device_manager).await;
     }
 
     if device_id.is_none() {
@@ -1982,7 +2215,13 @@ async fn main() -> Result<()> {
     let selected_device = device_id.expect("Device ID should be set");
     *app_state.device_id.write().await = Some(selected_device.clone());
 
+    // Set auto-enable permissions flag
+    app_state.auto_enable_permissions.store(enable_permissions, Ordering::SeqCst);
+
     info!("Starting MCP server for device: {}", selected_device);
+    if enable_permissions {
+        info!("Auto-enable permissions: ENABLED");
+    }
 
     let server = NeuralBridgeServer::new(app_state);
     let service = server.serve(stdio()).await
@@ -1995,36 +2234,121 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_check_mode(device_manager: &DeviceManager, _device_id: Option<&str>) -> Result<()> {
+async fn run_check_mode(device_manager: &DeviceManager) -> Result<()> {
     info!("Running NeuralBridge setup check...");
+    eprintln!();
 
+    // Check 1: ADB installation
+    eprintln!("1. Checking ADB installation...");
     match device_manager.check_adb_installed().await {
-        Ok(true) => info!("  ADB found"),
-        Ok(false) => error!("  ADB not found in PATH"),
-        Err(e) => error!("  Failed to check ADB: {}", e),
+        Ok(true) => eprintln!("   ✓ ADB found"),
+        Ok(false) => {
+            eprintln!("   ✗ ADB not found in PATH");
+            eprintln!("     Install Android SDK platform-tools");
+        }
+        Err(e) => eprintln!("   ✗ Failed to check ADB: {}", e),
     }
+    eprintln!();
 
-    match device_manager.discover_devices().await {
-        Ok(devices) if devices.is_empty() => warn!("  No devices found"),
+    // Check 2: Device discovery
+    eprintln!("2. Discovering Android devices...");
+    let devices = match device_manager.discover_devices().await {
+        Ok(devices) if devices.is_empty() => {
+            eprintln!("   ✗ No devices found");
+            eprintln!("     Connect a device or start an emulator");
+            return Ok(());
+        }
         Ok(devices) => {
-            info!("  Found {} device(s):", devices.len());
-            for d in &devices {
-                info!("    - {}", d);
+            eprintln!("   ✓ Found {} device(s)", devices.len());
+            devices
+        }
+        Err(e) => {
+            eprintln!("   ✗ Failed to list devices: {}", e);
+            return Ok(());
+        }
+    };
+    eprintln!();
+
+    // Check 3: Permissions per device
+    for device_id in &devices {
+        eprintln!("3. Checking device: {}", device_id);
+
+        match device_manager.check_permissions(device_id).await {
+            Ok(status) => {
+                eprintln!("   Companion app installed:       {}",
+                    if status.companion_installed { "✓" } else { "✗" });
+                eprintln!("   AccessibilityService enabled:  {}",
+                    if status.accessibility_enabled { "✓" } else { "✗" });
+                eprintln!("   NotificationListener enabled:  {}",
+                    if status.notification_listener_enabled { "✓" } else { "✗" });
+
+                if status.is_ready() {
+                    eprintln!("   Status: ✓ READY");
+                } else {
+                    eprintln!("   Status: ✗ NOT READY");
+                    if let Some(msg) = status.missing_permissions_message() {
+                        eprintln!("   {}", msg);
+                    }
+                }
+
+                // Check 4: Test connection to companion app
+                if status.is_ready() {
+                    eprintln!();
+                    eprintln!("4. Testing connection to companion app...");
+
+                    // Set up port forwarding
+                    match device_manager.setup_port_forwarding(device_id).await {
+                        Ok(_) => eprintln!("   ✓ Port forwarding setup successful"),
+                        Err(e) => {
+                            eprintln!("   ✗ Port forwarding failed: {}", e);
+                            continue;
+                        }
+                    }
+
+                    // Try to connect
+                    match DeviceConnection::connect().await {
+                        Ok(conn) => {
+                            eprintln!("   ✓ Connected to companion app");
+                            // Test connection is alive
+                            if conn.is_alive().await {
+                                eprintln!("   ✓ Connection is alive");
+                            } else {
+                                eprintln!("   ✗ Connection is not responding");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("   ✗ Connection failed: {}", e);
+                            eprintln!("     Make sure companion app is running");
+                            eprintln!("     Check logcat: adb logcat -s NeuralBridge:V");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("   ✗ Failed to check permissions: {}", e);
             }
         }
-        Err(e) => error!("  Failed to list devices: {}", e),
+        eprintln!();
     }
 
-    info!("Setup check complete");
+    eprintln!("Setup check complete");
     Ok(())
 }
 
 fn print_usage() {
     eprintln!("Usage: neuralbridge-mcp [OPTIONS]");
-    eprintln!("  --device <id>       Connect to specific device");
-    eprintln!("  --auto-discover     Auto-detect first available device");
-    eprintln!("  --check             Run setup verification");
-    eprintln!("  --help, -h          Show help");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --device <id>           Connect to specific device");
+    eprintln!("  --auto-discover         Auto-detect first available device");
+    eprintln!("  --enable-permissions    Auto-enable AccessibilityService and NotificationListener");
+    eprintln!("  --check                 Run setup verification and show device status");
+    eprintln!("  --help, -h              Show this help message");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  neuralbridge-mcp --auto-discover --enable-permissions");
+    eprintln!("  neuralbridge-mcp --device emulator-5554");
+    eprintln!("  neuralbridge-mcp --check");
 }
 
 // ============================================================================
@@ -2329,5 +2653,198 @@ mod tests {
             };
             assert_eq!(params.text, text);
         }
+    }
+
+    // ============================================================================
+    // Error Classification Tests
+    // ============================================================================
+
+    /// Test connection refused error classification
+    #[test]
+    fn test_error_classification_connection_refused() {
+        let error = anyhow::anyhow!("Connection refused by peer");
+        let mcp_error = to_mcp_error(error);
+
+        assert_eq!(mcp_error.code, ErrorCode::INTERNAL_ERROR);
+        assert!(mcp_error.message.contains("Failed to connect to companion app"));
+        assert!(mcp_error.message.contains("Troubleshooting checklist"));
+        assert!(mcp_error.message.contains("adb forward tcp:38472"));
+        assert!(mcp_error.message.contains("AccessibilityService"));
+    }
+
+    /// Test connection timeout error classification
+    #[test]
+    fn test_error_classification_connection_timeout() {
+        let error = anyhow::anyhow!("Connection timeout after 5 seconds");
+        let mcp_error = to_mcp_error(error);
+
+        assert_eq!(mcp_error.code, ErrorCode::INTERNAL_ERROR);
+        assert!(mcp_error.message.contains("Failed to connect to companion app"));
+        assert!(mcp_error.message.contains("companion app is installed"));
+        assert!(mcp_error.message.contains("adb logcat"));
+    }
+
+    /// Test ADB error classification
+    #[test]
+    fn test_error_classification_adb_error() {
+        let error = anyhow::anyhow!("ADB command failed: device not found");
+        let mcp_error = to_mcp_error(error);
+
+        assert_eq!(mcp_error.code, ErrorCode::INTERNAL_ERROR);
+        assert!(mcp_error.message.contains("ADB operation failed"));
+        assert!(mcp_error.message.contains("adb devices"));
+        assert!(mcp_error.message.contains("device is connected and authorized"));
+        assert!(mcp_error.message.contains("adb kill-server"));
+    }
+
+    /// Test "device not found" error classification
+    #[test]
+    fn test_error_classification_device_not_found() {
+        let error = anyhow::anyhow!("Device not found: emulator-5554");
+        let mcp_error = to_mcp_error(error);
+
+        assert_eq!(mcp_error.code, ErrorCode::INTERNAL_ERROR);
+        assert!(mcp_error.message.contains("ADB operation failed"));
+    }
+
+    /// Test "no device selected" error classification
+    #[test]
+    fn test_error_classification_no_device_selected() {
+        let error = anyhow::anyhow!("No device selected");
+        let mcp_error = to_mcp_error(error);
+
+        assert_eq!(mcp_error.code, ErrorCode::INVALID_PARAMS);
+        assert!(mcp_error.message.contains("No device selected"));
+        assert!(mcp_error.message.contains("--device <id>"));
+        assert!(mcp_error.message.contains("--auto-discover"));
+    }
+
+    /// Test port forwarding error classification
+    #[test]
+    fn test_error_classification_port_forwarding() {
+        let error = anyhow::anyhow!("Port forwarding failed for device emulator-5554");
+        let mcp_error = to_mcp_error(error);
+
+        assert_eq!(mcp_error.code, ErrorCode::INTERNAL_ERROR);
+        assert!(mcp_error.message.contains("Port forwarding setup failed"));
+        assert!(mcp_error.message.contains("adb forward tcp:38472"));
+        assert!(mcp_error.message.contains("port conflicts"));
+        assert!(mcp_error.message.contains("netstat"));
+    }
+
+    /// Test generic error classification (fallback)
+    #[test]
+    fn test_error_classification_generic() {
+        let error = anyhow::anyhow!("Some random error occurred");
+        let mcp_error = to_mcp_error(error);
+
+        assert_eq!(mcp_error.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(mcp_error.message, "Some random error occurred");
+        // Generic errors should just return the error message without modifications
+        assert!(!mcp_error.message.contains("Troubleshooting"));
+    }
+
+    /// Test that error classification is case-insensitive
+    #[test]
+    fn test_error_classification_case_insensitive() {
+        // Test with uppercase
+        let error1 = anyhow::anyhow!("CONNECTION REFUSED");
+        let mcp_error1 = to_mcp_error(error1);
+        assert!(mcp_error1.message.contains("Failed to connect to companion app"));
+
+        // Test with mixed case
+        let error2 = anyhow::anyhow!("Connection Timeout");
+        let mcp_error2 = to_mcp_error(error2);
+        assert!(mcp_error2.message.contains("Failed to connect to companion app"));
+
+        // Test with lowercase
+        let error3 = anyhow::anyhow!("adb device not found");
+        let mcp_error3 = to_mcp_error(error3);
+        assert!(mcp_error3.message.contains("ADB operation failed"));
+    }
+
+    /// Test connection error variations
+    #[test]
+    fn test_error_classification_connection_variations() {
+        let variations = vec![
+            "connection refused",
+            "Connection refused by peer",
+            "connection timeout occurred",
+            "timeout while connecting - connection timeout",
+        ];
+
+        for error_msg in variations {
+            let error = anyhow::anyhow!("{}", error_msg);
+            let mcp_error = to_mcp_error(error);
+            assert!(
+                mcp_error.message.contains("Failed to connect to companion app"),
+                "Error '{}' should be classified as connection error",
+                error_msg
+            );
+        }
+    }
+
+    /// Test ADB error variations
+    #[test]
+    fn test_error_classification_adb_variations() {
+        let variations = vec![
+            "adb: command not found",
+            "ADB failed to start",
+            "device not found in adb",
+        ];
+
+        for error_msg in variations {
+            let error = anyhow::anyhow!("{}", error_msg);
+            let mcp_error = to_mcp_error(error);
+            assert!(
+                mcp_error.message.contains("ADB operation failed"),
+                "Error '{}' should be classified as ADB error",
+                error_msg
+            );
+        }
+    }
+
+    /// Test that error codes are correctly assigned
+    #[test]
+    fn test_error_codes() {
+        // Connection errors → INTERNAL_ERROR
+        let conn_error = anyhow::anyhow!("connection refused");
+        assert_eq!(to_mcp_error(conn_error).code, ErrorCode::INTERNAL_ERROR);
+
+        // No device selected → INVALID_PARAMS
+        let device_error = anyhow::anyhow!("no device selected");
+        assert_eq!(to_mcp_error(device_error).code, ErrorCode::INVALID_PARAMS);
+
+        // Generic errors → INTERNAL_ERROR
+        let generic_error = anyhow::anyhow!("something went wrong");
+        assert_eq!(to_mcp_error(generic_error).code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    /// Test that troubleshooting checklists are complete
+    #[test]
+    fn test_troubleshooting_checklists() {
+        // Connection error checklist
+        let conn_error = anyhow::anyhow!("connection refused");
+        let conn_msg = to_mcp_error(conn_error).message;
+        assert!(conn_msg.contains("1."));
+        assert!(conn_msg.contains("2."));
+        assert!(conn_msg.contains("3."));
+        assert!(conn_msg.contains("4."));
+
+        // ADB error checklist
+        let adb_error = anyhow::anyhow!("adb failed");
+        let adb_msg = to_mcp_error(adb_error).message;
+        assert!(adb_msg.contains("1."));
+        assert!(adb_msg.contains("2."));
+        assert!(adb_msg.contains("3."));
+        assert!(adb_msg.contains("4."));
+
+        // Port forwarding checklist
+        let port_error = anyhow::anyhow!("port forwarding failed");
+        let port_msg = to_mcp_error(port_error).message;
+        assert!(port_msg.contains("1."));
+        assert!(port_msg.contains("2."));
+        assert!(port_msg.contains("3."));
+        assert!(port_msg.contains("4."));
     }
 }

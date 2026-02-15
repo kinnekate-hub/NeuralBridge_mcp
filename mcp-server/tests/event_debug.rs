@@ -11,12 +11,13 @@ use uuid::Uuid;
 
 use neuralbridge_mcp::protocol::pb::{
     Request, Response, Event, request::Command,
-    EnableEventsRequest, TapRequest, tap_request, Point, EventType,
+    EnableEventsRequest, EventType,
 };
 use neuralbridge_mcp::protocol::codec::{MessageType, encode_message, MessageFramer};
 use prost::Message;
 
 #[tokio::test]
+#[ignore] // Manual test - requires running companion app. Run with: cargo test -- --ignored
 async fn debug_event_streaming() -> Result<()> {
     println!("\n=== Event Streaming Debug Test ===\n");
 
@@ -51,14 +52,9 @@ async fn debug_event_streaming() -> Result<()> {
     // Drain any pending events
     println!("4. Draining pending events...");
     let mut drained = 0;
-    loop {
-        match read_event_timeout(&mut stream, &mut framer, Duration::from_millis(200)).await {
-            Ok(Some(evt)) => {
-                println!("   - Drained event: type={}, id={}", evt.event_type, evt.event_id);
-                drained += 1;
-            }
-            _ => break,
-        }
+    while let Ok(Some(evt)) = read_event_timeout(&mut stream, &mut framer, Duration::from_millis(200)).await {
+        println!("   - Drained event: type={}, id={}", evt.event_type, evt.event_id);
+        drained += 1;
     }
     println!("   ✓ Drained {} events\n", drained);
 

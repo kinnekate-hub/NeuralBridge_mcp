@@ -467,6 +467,40 @@ Theme resources are in `companion-app/app/src/main/res/values/`:
 - Apply proper elevation (cards: 2dp, FAB: 6dp, dialogs: 24dp)
 - Follow Material Design 3 component guidelines
 
+## Problem Solving Principles
+
+- **Simplest fix first** — no new classes, animations, or architectural changes unless explicitly asked
+- **Show current state before changes** — reproduce the issue, show exact behavior, get approval before implementing
+- **Immediate revert on regression** — if a fix worsens behavior, revert immediately and re-analyze
+- **Two-strikes rule** — if first attempt fails, research 3 alternatives ranked by simplicity, present to user
+- **Root cause first** — diagnose before proposing solutions; never guess-and-check
+
+## Git & Version Control
+
+- **Scoped reverts only** — revert ONLY the specific changes mentioned, not all recent work
+- **Ask for clarification** if revert scope is ambiguous
+- **Never force-push** without explicit user approval
+
+## Workflow Conventions
+
+- Always use project-defined skills (`/bugfix`, `/plan-review`, `/smart-commit`) for workflows that have custom skills
+- Do NOT fall back to raw bash commands when a skill exists for the task
+- **Build verification after ANY code change** before reporting completion
+- Use `/debug-agents` for complex multi-subsystem bugs requiring parallel investigation
+
+## Language & Platform Notes
+
+- **Rust:** verify `cargo check` + `cargo test` pass before reporting done
+- **Android/Kotlin:** verify correct import paths (e.g., `foundation.shape` vs `ui.graphics`), M3 deps present, `./gradlew assembleDebug` passes
+- **Protobuf:** when updating `.proto` files, regenerate code in BOTH projects (Rust: `cargo build`, Kotlin: `./gradlew generateProto`)
+- **Build order matters:** proto changes → Rust build → Kotlin build
+
+## MCP & Tools
+
+- Use MCP tools as intended — do NOT fall back to raw ADB when an MCP tool exists for the operation
+- **Selector preference order:** resource_id > text > content_desc > coordinates
+- Always validate selectors have at least one non-empty field before sending to device
+
 ## Notes
 
 - **Performance is critical:** Every millisecond matters. Profile before optimizing, but be conscious of latency in all design decisions.

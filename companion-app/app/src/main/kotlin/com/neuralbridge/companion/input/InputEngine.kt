@@ -68,18 +68,14 @@ class InputEngine(
             }
         }
 
-        // Strategy 2: Use clipboard paste (for long text or if ACTION_SET_TEXT failed)
-        if (text.length > 100 || true) { // Always try paste for now
-            return inputViaClipboard(element, text, append)
-        }
+        // Strategy 2: Fallback to clipboard paste (for long text OR if ACTION_SET_TEXT failed)
+        Log.w(TAG, "ACTION_SET_TEXT failed, falling back to clipboard paste")
+        return inputViaClipboard(element, text, append)
 
         // TODO Week 4: Strategy 3: IME injection
         // - Focus element
         // - Inject key events character by character
         // - This is slower but works for all apps
-
-        Log.w(TAG, "Failed to input text via any method")
-        return false
     }
 
     /**
@@ -107,7 +103,7 @@ class InputEngine(
         }
 
         // Set clipboard
-        val clip = ClipData.newPlainText("neuralbridge", text)
+        val clip = ClipData.newPlainText("", text)
         clipboardManager.setPrimaryClip(clip)
 
         // Paste
@@ -184,7 +180,7 @@ class InputEngine(
      * Set clipboard content
      */
     fun setClipboardText(text: String) {
-        val clip = ClipData.newPlainText("neuralbridge", text)
+        val clip = ClipData.newPlainText("", text)
         clipboardManager.setPrimaryClip(clip)
         Log.d(TAG, "Clipboard set: ${text.length} chars")
     }

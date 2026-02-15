@@ -37,6 +37,47 @@ pub struct DeviceInfo {
     pub android_version: Option<String>,
 }
 
+/// Permission status for companion app
+#[derive(Debug, Clone)]
+pub struct PermissionStatus {
+    /// Whether companion app is installed
+    pub companion_installed: bool,
+
+    /// Whether AccessibilityService is enabled
+    pub accessibility_enabled: bool,
+
+    /// Whether NotificationListenerService is enabled
+    pub notification_listener_enabled: bool,
+}
+
+impl PermissionStatus {
+    /// Check if all permissions are ready
+    pub fn is_ready(&self) -> bool {
+        self.companion_installed && self.accessibility_enabled && self.notification_listener_enabled
+    }
+
+    /// Generate user-friendly error message for missing permissions
+    pub fn missing_permissions_message(&self) -> Option<String> {
+        if self.is_ready() {
+            return None;
+        }
+
+        let mut missing = Vec::new();
+
+        if !self.companion_installed {
+            missing.push("Companion app not installed");
+        }
+        if !self.accessibility_enabled {
+            missing.push("AccessibilityService not enabled");
+        }
+        if !self.notification_listener_enabled {
+            missing.push("NotificationListenerService not enabled");
+        }
+
+        Some(format!("Missing permissions: {}", missing.join(", ")))
+    }
+}
+
 impl DeviceManager {
     /// Create new device manager
     pub async fn new() -> Result<Self> {
@@ -214,6 +255,119 @@ impl DeviceManager {
     pub fn adb(&self) -> &AdbExecutor {
         &self.adb
     }
+
+    /// Check if NotificationListenerService is enabled on device
+    pub async fn check_notification_listener_enabled(&self, device_id: &str) -> Result<bool> {
+        debug!("Checking if NotificationListenerService is enabled on {}", device_id);
+
+        // Execute: adb -s <device_id> shell settings get secure enabled_notification_listeners
+        let output = self.adb.execute_command(&[
+            "-s", device_id,
+            "shell", "settings", "get", "secure", "enabled_notification_listeners"
+        ]).await?;
+
+        Ok(output.contains("com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"))
+    }
+
+    /// Check all permissions required for companion app
+    pub async fn check_permissions(&self, device_id: &str) -> Result<PermissionStatus> {
+        info!("Checking permissions for device: {}", device_id);
+
+        // Run all permission checks in parallel using tokio::join!
+        let (companion_result, accessibility_result, notification_result) = tokio::join!(
+            self.check_companion_installed(device_id),
+            self.check_accessibility_enabled(device_id),
+            self.check_notification_listener_enabled(device_id)
+        );
+
+        let status = PermissionStatus {
+            companion_installed: companion_result?,
+            accessibility_enabled: accessibility_result?,
+            notification_listener_enabled: notification_result?,
+        };
+
+        if let Some(msg) = status.missing_permissions_message() {
+            warn!("{}", msg);
+        } else {
+            info!("All permissions ready");
+        }
+
+        Ok(status)
+    }
+
+    /// Enable AccessibilityService on device via ADB
+    ///
+    /// Automatically enables the service without user interaction.
+    /// Requires the companion app to be installed first.
+    pub async fn enable_accessibility_service(&self, device_id: &str) -> Result<()> {
+        // Validate device_id to prevent command injection
+        // ADB device IDs contain only: alphanumeric, dots, colons, dashes, underscores
+        if !device_id.chars().all(|c| c.is_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_') {
+            anyhow::bail!("Invalid device_id format: contains unsafe characters");
+        }
+
+        info!("Enabling AccessibilityService on {}", device_id);
+
+        let service_component = "com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService";
+
+        // Get current enabled services
+        let current = self.adb.execute_command(&[
+            "-s", device_id,
+            "shell", "settings", "get", "secure", "enabled_accessibility_services"
+        ]).await?;
+
+        // Build new value (append if others exist)
+        let new_value = if current.trim().is_empty() || current.trim() == "null" {
+            service_component.to_string()
+        } else {
+            let current = current.trim();
+            if current.contains(service_component) {
+                info!("AccessibilityService already enabled");
+                return Ok(());
+            }
+            format!("{}:{}", current, service_component)
+        };
+
+        // Set enabled services
+        self.adb.execute_command(&[
+            "-s", device_id,
+            "shell", "settings", "put", "secure", "enabled_accessibility_services", &new_value
+        ]).await?;
+
+        // Enable accessibility globally
+        self.adb.execute_command(&[
+            "-s", device_id,
+            "shell", "settings", "put", "secure", "accessibility_enabled", "1"
+        ]).await?;
+
+        info!("AccessibilityService enabled successfully");
+        Ok(())
+    }
+
+    /// Enable NotificationListenerService on device via ADB
+    ///
+    /// Automatically enables the service without user interaction.
+    /// Requires the companion app to be installed first.
+    pub async fn enable_notification_listener(&self, device_id: &str) -> Result<()> {
+        // Validate device_id to prevent command injection
+        // ADB device IDs contain only: alphanumeric, dots, colons, dashes, underscores
+        if !device_id.chars().all(|c| c.is_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_') {
+            anyhow::bail!("Invalid device_id format: contains unsafe characters");
+        }
+
+        info!("Enabling NotificationListenerService on {}", device_id);
+
+        let service_component = "com.neuralbridge.companion/.service.NeuralBridgeNotificationListener";
+
+        // Use cmd notification allow_listener
+        self.adb.execute_command(&[
+            "-s", device_id,
+            "shell", "cmd", "notification", "allow_listener", service_component
+        ]).await?;
+
+        info!("NotificationListenerService enabled successfully");
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +406,237 @@ emulator-5554          offline
 
         let devices = manager.parse_devices_output(output).unwrap();
         assert_eq!(devices.len(), 0); // Offline devices are filtered out
+    }
+
+    // ============================================================================
+    // PermissionStatus Tests
+    // ============================================================================
+
+    /// Test is_ready() when all permissions are granted
+    #[test]
+    fn test_permission_status_all_ready() {
+        let status = PermissionStatus {
+            companion_installed: true,
+            accessibility_enabled: true,
+            notification_listener_enabled: true,
+        };
+        assert!(status.is_ready(), "Should be ready when all permissions granted");
+    }
+
+    /// Test is_ready() when companion app not installed
+    #[test]
+    fn test_permission_status_no_companion() {
+        let status = PermissionStatus {
+            companion_installed: false,
+            accessibility_enabled: true,
+            notification_listener_enabled: true,
+        };
+        assert!(!status.is_ready(), "Should not be ready without companion app");
+    }
+
+    /// Test is_ready() when accessibility not enabled
+    #[test]
+    fn test_permission_status_no_accessibility() {
+        let status = PermissionStatus {
+            companion_installed: true,
+            accessibility_enabled: false,
+            notification_listener_enabled: true,
+        };
+        assert!(!status.is_ready(), "Should not be ready without accessibility");
+    }
+
+    /// Test is_ready() when notification listener not enabled
+    #[test]
+    fn test_permission_status_no_notification_listener() {
+        let status = PermissionStatus {
+            companion_installed: true,
+            accessibility_enabled: true,
+            notification_listener_enabled: false,
+        };
+        assert!(!status.is_ready(), "Should not be ready without notification listener");
+    }
+
+    /// Test is_ready() when nothing is ready
+    #[test]
+    fn test_permission_status_nothing_ready() {
+        let status = PermissionStatus {
+            companion_installed: false,
+            accessibility_enabled: false,
+            notification_listener_enabled: false,
+        };
+        assert!(!status.is_ready(), "Should not be ready when nothing is granted");
+    }
+
+    /// Test missing_permissions_message() when all ready
+    #[test]
+    fn test_missing_permissions_message_none() {
+        let status = PermissionStatus {
+            companion_installed: true,
+            accessibility_enabled: true,
+            notification_listener_enabled: true,
+        };
+        assert_eq!(
+            status.missing_permissions_message(),
+            None,
+            "Should return None when all permissions ready"
+        );
+    }
+
+    /// Test missing_permissions_message() when companion not installed
+    #[test]
+    fn test_missing_permissions_message_companion() {
+        let status = PermissionStatus {
+            companion_installed: false,
+            accessibility_enabled: true,
+            notification_listener_enabled: true,
+        };
+        let msg = status.missing_permissions_message().unwrap();
+        assert!(
+            msg.contains("Companion app not installed"),
+            "Message should mention companion app: {}",
+            msg
+        );
+    }
+
+    /// Test missing_permissions_message() when accessibility not enabled
+    #[test]
+    fn test_missing_permissions_message_accessibility() {
+        let status = PermissionStatus {
+            companion_installed: true,
+            accessibility_enabled: false,
+            notification_listener_enabled: true,
+        };
+        let msg = status.missing_permissions_message().unwrap();
+        assert!(
+            msg.contains("AccessibilityService not enabled"),
+            "Message should mention accessibility: {}",
+            msg
+        );
+    }
+
+    /// Test missing_permissions_message() when notification listener not enabled
+    #[test]
+    fn test_missing_permissions_message_notification_listener() {
+        let status = PermissionStatus {
+            companion_installed: true,
+            accessibility_enabled: true,
+            notification_listener_enabled: false,
+        };
+        let msg = status.missing_permissions_message().unwrap();
+        assert!(
+            msg.contains("NotificationListenerService not enabled"),
+            "Message should mention notification listener: {}",
+            msg
+        );
+    }
+
+    /// Test missing_permissions_message() when multiple permissions missing
+    #[test]
+    fn test_missing_permissions_message_multiple() {
+        let status = PermissionStatus {
+            companion_installed: false,
+            accessibility_enabled: false,
+            notification_listener_enabled: true,
+        };
+        let msg = status.missing_permissions_message().unwrap();
+        assert!(
+            msg.contains("Companion app not installed"),
+            "Should mention companion app: {}",
+            msg
+        );
+        assert!(
+            msg.contains("AccessibilityService not enabled"),
+            "Should mention accessibility: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("NotificationListenerService"),
+            "Should not mention notification listener when it's ready: {}",
+            msg
+        );
+    }
+
+    /// Test missing_permissions_message() when all permissions missing
+    #[test]
+    fn test_missing_permissions_message_all() {
+        let status = PermissionStatus {
+            companion_installed: false,
+            accessibility_enabled: false,
+            notification_listener_enabled: false,
+        };
+        let msg = status.missing_permissions_message().unwrap();
+        assert!(msg.contains("Companion app not installed"), "Should mention all: {}", msg);
+        assert!(msg.contains("AccessibilityService not enabled"), "Should mention all: {}", msg);
+        assert!(msg.contains("NotificationListenerService not enabled"), "Should mention all: {}", msg);
+    }
+
+    // ============================================================================
+    // ADB Output Parsing Tests
+    // ============================================================================
+
+    /// Test accessibility service parsing - enabled
+    #[test]
+    fn test_parse_accessibility_enabled() {
+        let output = "com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService:com.android.talkback/.TalkBackService";
+        assert!(
+            output.contains("com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService"),
+            "Should detect accessibility service in output"
+        );
+    }
+
+    /// Test accessibility service parsing - not enabled
+    #[test]
+    fn test_parse_accessibility_not_enabled() {
+        let output = "com.android.talkback/.TalkBackService";
+        assert!(
+            !output.contains("com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService"),
+            "Should not detect accessibility service when not present"
+        );
+    }
+
+    /// Test accessibility service parsing - null/empty
+    #[test]
+    fn test_parse_accessibility_null() {
+        let outputs = vec!["null", "", "  "];
+        for output in outputs {
+            assert!(
+                !output.contains("com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService"),
+                "Should handle null/empty output: '{}'",
+                output
+            );
+        }
+    }
+
+    /// Test notification listener parsing - enabled
+    #[test]
+    fn test_parse_notification_listener_enabled() {
+        let output = "com.neuralbridge.companion/.service.NeuralBridgeNotificationListener:com.android.systemui/.notificationlistener";
+        assert!(
+            output.contains("com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"),
+            "Should detect notification listener in output"
+        );
+    }
+
+    /// Test notification listener parsing - not enabled
+    #[test]
+    fn test_parse_notification_listener_not_enabled() {
+        let output = "com.android.systemui/.notificationlistener";
+        assert!(
+            !output.contains("com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"),
+            "Should not detect notification listener when not present"
+        );
+    }
+
+    /// Test notification listener parsing - null/empty
+    #[test]
+    fn test_parse_notification_listener_null() {
+        let outputs = vec!["null", "", "  "];
+        for output in outputs {
+            assert!(
+                !output.contains("com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"),
+                "Should handle null/empty output: '{}'",
+                output
+            );
+        }
     }
 }
