@@ -289,12 +289,12 @@ impl DeviceConnection {
         ).await {
             Ok(Ok(0)) => {
                 debug!("Connection closed (EOF)");
-                return false;
+                false
             }
-            Ok(Ok(_)) => return true,  // Data available = definitely alive
+            Ok(Ok(_)) => true,  // Data available = definitely alive
             Ok(Err(_)) => {
                 debug!("Connection health check failed (peek error)");
-                return false;
+                false
             }
             Err(_) => {
                 // Timeout on peek = no data waiting. Try a zero-byte write to verify

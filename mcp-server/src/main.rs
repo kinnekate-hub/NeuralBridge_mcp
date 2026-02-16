@@ -437,6 +437,8 @@ pub struct GetUiTreeParams {
 pub struct ScreenshotParams {
     /// Image quality: "full" (80%) or "thumbnail" (40%)
     pub quality: Option<String>,
+    /// Maximum width in pixels (default: 720). Use 0 for full resolution.
+    pub max_width: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -757,6 +759,42 @@ impl NeuralBridgeServer {
         }
     }
 
+    /// Downscale image to max_width while preserving aspect ratio
+    /// Returns (jpeg_bytes, width, height)
+    fn downscale_image(image_data: &[u8], max_width: u32) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+        use image::ImageReader;
+        use std::io::Cursor;
+
+        // Decode image
+        let img = ImageReader::new(Cursor::new(image_data))
+            .with_guessed_format()
+            .map_err(|e| anyhow::anyhow!("Failed to detect image format: {}", e))?
+            .decode()
+            .map_err(|e| anyhow::anyhow!("Failed to decode image: {}", e))?;
+
+        let (orig_width, orig_height) = (img.width(), img.height());
+
+        // Skip downscaling if already smaller or no limit
+        if max_width == 0 || orig_width <= max_width {
+            return Ok((image_data.to_vec(), orig_width, orig_height));
+        }
+
+        // Calculate new dimensions preserving aspect ratio
+        let scale = max_width as f32 / orig_width as f32;
+        let new_width = max_width;
+        let new_height = (orig_height as f32 * scale).round() as u32;
+
+        // Resize using Lanczos3 (high quality)
+        let resized = img.resize(new_width, new_height, image::imageops::FilterType::Lanczos3);
+
+        // Encode to JPEG
+        let mut output = Vec::new();
+        resized.write_to(&mut Cursor::new(&mut output), image::ImageFormat::Jpeg)
+            .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
+
+        Ok((output, new_width, new_height))
+    }
+
     // ========================================================================
     // OBSERVE tools
     // ========================================================================
@@ -837,7 +875,7 @@ impl NeuralBridgeServer {
 
     #[tool(
         name = "android_screenshot",
-        description = "Capture a screenshot. Returns base64-encoded JPEG. Quality: 'full' (~50KB) or 'thumbnail' (~20KB). Typical latency: ~60ms (MediaProjection) or ~200ms (ADB fallback). Note: On headless emulators or without user consent, MediaProjection will fail and automatically fall back to ADB screencap (slower but headless-compatible)."
+        description = "Capture a screenshot. Returns image as MCP image content. Quality: 'full' (80%) or 'thumbnail' (40%). Resolution: max_width (default 720px, use 0 for full). Optimized for token efficiency - uses vision tokens instead of text. Typical latency: ~70ms."
     )]
     async fn android_screenshot(
         &self,
@@ -884,23 +922,29 @@ impl NeuralBridgeServer {
                 let screenshot_data = adb.screenshot(device_id_str).await
                     .map_err(|e| to_mcp_error(anyhow::anyhow!("ADB screencap failed: {}", e)))?;
 
+                // Downscale if needed (max_width=0 means no downscaling, returns original dimensions)
+                let max_width = params.max_width.unwrap_or(720);
+                let (final_data, width, height) = Self::downscale_image(&screenshot_data, max_width)
+                    .map_err(to_mcp_error)?;
+
                 // Encode as base64
                 let base64_image = base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
-                    &screenshot_data
+                    &final_data
                 );
 
-                // Return result (PNG format from ADB)
-                let result = serde_json::json!({
-                    "success": true,
-                    "image_data": base64_image,
-                    "width": 0,  // Unknown from ADB
-                    "height": 0, // Unknown from ADB
+                // Return as image content + metadata
+                let metadata = serde_json::json!({
+                    "width": width,
+                    "height": height,
                     "format": "png",
                     "method": "adb_fallback",
                 });
 
-                return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                return Ok(CallToolResult::success(vec![
+                    Content::image(base64_image, "image/png"),
+                    Content::text(metadata.to_string()),
+                ]));
             }
 
             return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -917,27 +961,36 @@ impl NeuralBridgeServer {
             )])),
         };
 
+        // Downscale if needed
+        let max_width = params.max_width.unwrap_or(720);
+        let (final_data, final_width, final_height) = if max_width > 0 && screenshot.width > max_width as i32 {
+            let (data, w, h) = Self::downscale_image(&screenshot.image_data, max_width)
+                .map_err(to_mcp_error)?;
+            (data, w, h)
+        } else {
+            (screenshot.image_data.clone(), screenshot.width as u32, screenshot.height as u32)
+        };
+
         // Encode image data as base64
         let base64_image = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
-            &screenshot.image_data
+            &final_data
         );
 
-        // Return result with base64-encoded image
-        let result = serde_json::json!({
-            "success": true,
-            "image_data": base64_image,
-            "width": screenshot.width,
-            "height": screenshot.height,
-            "format": match screenshot.format {
-                1 => "jpeg",
-                2 => "png",
-                _ => "unknown",
-            },
+        // Return as image content + metadata
+        let metadata = serde_json::json!({
+            "width": final_width,
+            "height": final_height,
+            "format": "jpeg",
+            "original_width": screenshot.width,
+            "original_height": screenshot.height,
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![
+            Content::image(base64_image, "image/jpeg"),
+            Content::text(metadata.to_string()),
+        ]))
     }
 
     #[tool(
@@ -1245,9 +1298,19 @@ impl NeuralBridgeServer {
             })
             .collect();
 
-        // Step 5: Build comprehensive response
-        let result = serde_json::json!({
-            "success": true,
+        // Step 5: Downscale screenshot to 540px (optimal for screen context)
+        let (final_data, final_width, final_height) = if screenshot_result.width > 540 {
+            Self::downscale_image(&screenshot_result.image_data, 540)
+                .map_err(to_mcp_error)?
+        } else {
+            (screenshot_result.image_data.clone(), screenshot_result.width as u32, screenshot_result.height as u32)
+        };
+
+        // Encode screenshot as base64
+        let base64_screenshot = base64::engine::general_purpose::STANDARD.encode(&final_data);
+
+        // Step 6: Build comprehensive response
+        let metadata = serde_json::json!({
             "app_info": {
                 "package_name": app_info.package_name,
                 "activity_name": app_info.activity_name,
@@ -1258,17 +1321,18 @@ impl NeuralBridgeServer {
                 "filtered_elements": filtered_elements.len(),
                 "elements": filtered_elements,
             },
-            "screenshot": {
-                "width": screenshot_result.width,
-                "height": screenshot_result.height,
+            "screenshot_info": {
+                "width": final_width,
+                "height": final_height,
                 "format": "jpeg",
-                "data": base64::engine::general_purpose::STANDARD.encode(&screenshot_result.image_data),
-                "size_bytes": screenshot_result.image_data.len(),
             },
             "capture_timestamp": ui_tree.capture_timestamp,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![
+            Content::text(metadata.to_string()),
+            Content::image(base64_screenshot, "image/jpeg"),
+        ]))
     }
 
     // ========================================================================
