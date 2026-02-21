@@ -80,18 +80,20 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         Log.i(TAG, "AccessibilityService connected")
 
-        // Set static instance
-        instance = this
         startTime = System.currentTimeMillis()
 
         // Configure accessibility service
         configureAccessibilityService()
 
-        // Initialize components
+        // Initialize components (sets gestureEngine, uiTreeWalker, screenshotPipeline)
         initializeComponents()
 
-        // Start TCP server
+        // Start TCP server (sets tcpServer)
         startTcpServer()
+
+        // Publish instance only after all lateinit vars are initialized to avoid
+        // UninitializedPropertyAccessException on early commands
+        instance = this
 
         // Start foreground service
         startForegroundService()

@@ -390,23 +390,3 @@ class ScreenshotPipeline(
     }
 }
 
-/**
- * ADB Screenshot Provider (fallback)
- *
- * This is a placeholder for the ADB fallback path.
- * Actual implementation must route through MCP server's ADB connection.
- */
-object AdbScreencapProvider {
-    /**
-     * Capture screenshot via ADB
-     *
-     * Requires routing request back to MCP server, which executes:
-     * adb exec-out screencap -p
-     *
-     * Returns PNG bytes, which must be converted to JPEG if needed.
-     */
-    suspend fun capture(): ByteArray {
-        // TODO Week 4: Implement ADB screenshot routing
-        throw NotImplementedError("ADB screencap fallback not yet implemented")
-    }
-}

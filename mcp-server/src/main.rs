@@ -36,6 +36,32 @@ use protocol::connection::DeviceConnection;
 use protocol::pb::{self, Request, request::Command};
 
 // ============================================================================
+// Response Format Configuration
+// ============================================================================
+
+pub struct ResponseFormatConfig {
+    pub compact_tree: bool,
+    pub filter_elements: bool,
+    pub compact_bounds: bool,
+    pub consolidate: bool,
+    // Always-on (not configurable):
+    //   omit_empty   — empty/false fields always omitted in element JSON
+    //   strip_success — "success": true always omitted from responses
+    //   dynamic_tools — android_search_tools and android_describe_tools always registered
+}
+
+impl Default for ResponseFormatConfig {
+    fn default() -> Self {
+        Self {
+            compact_tree: true,
+            filter_elements: true,
+            compact_bounds: true,
+            consolidate: true,
+        }
+    }
+}
+
+// ============================================================================
 // Application State
 // ============================================================================
 
@@ -46,6 +72,7 @@ pub struct AppState {
     event_buffer: Arc<RwLock<VecDeque<pb::Event>>>,
     auto_enable_permissions: AtomicBool,
     permissions_checked: AtomicBool,
+    response_config: ResponseFormatConfig,
 }
 
 // Helper to convert anyhow errors to MCP errors with detailed classification
@@ -245,7 +272,7 @@ async fn retry_on_transient(
 }
 
 impl AppState {
-    pub fn new(device_manager: DeviceManager) -> Self {
+    pub fn new(device_manager: DeviceManager, response_config: ResponseFormatConfig) -> Self {
         Self {
             device_manager: Arc::new(device_manager),
             connection: Arc::new(RwLock::new(None)),
@@ -253,7 +280,12 @@ impl AppState {
             event_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
             auto_enable_permissions: AtomicBool::new(false),
             permissions_checked: AtomicBool::new(false),
+            response_config,
         }
+    }
+
+    pub fn config(&self) -> &ResponseFormatConfig {
+        &self.response_config
     }
 
     /// Check if companion app is ready with required permissions
@@ -431,6 +463,8 @@ pub struct GetUiTreeParams {
     pub include_invisible: Option<bool>,
     /// Max tree depth (0 = unlimited)
     pub max_depth: Option<i32>,
+    /// Filter mode: "all" (every element), "interactive" (clickable/focusable/scrollable/text), "text" (text-bearing only). Default: "interactive"
+    pub filter: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -761,13 +795,135 @@ pub struct SelectDeviceParams {
     pub auto_enable_permissions: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SearchToolsParams {
+    /// Keyword to search for in tool names and descriptions
+    pub query: String,
+    /// Filter by category: "observe", "act", "manage", "wait", "test", "meta"
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DescribeToolsParams {
+    /// Tool names to describe (comma-separated or array)
+    pub tools: Vec<String>,
+}
+
+// ============================================================================
+// Logcat compression
+// ============================================================================
+
+fn compress_logcat(raw: &str, max_chars: usize) -> (String, usize) {
+    let original_len = raw.len();
+
+    // Strip timestamps: logcat lines look like "02-19 10:23:45.123  1234  5678 W TAG: msg"
+    let stripped: Vec<String> = raw.lines().map(|line| {
+        // Try to strip "MM-DD HH:MM:SS.mmm  PID  TID " prefix
+        let parts: Vec<&str> = line.splitn(6, ' ').collect();
+        if parts.len() >= 6 && parts[0].len() == 5 && parts[1].contains(':') {
+            // Skip date(0), time(1), pid(2), tid(3) - keep level(4) onwards
+            parts[4..].join(" ")
+        } else {
+            line.to_string()
+        }
+    }).collect();
+
+    // Deduplicate consecutive identical lines
+    let mut deduped: Vec<String> = Vec::new();
+    let mut count = 1usize;
+    for i in 0..stripped.len() {
+        if i + 1 < stripped.len() && stripped[i] == stripped[i + 1] {
+            count += 1;
+        } else {
+            if count > 1 {
+                deduped.push(format!("{} (x{})", stripped[i], count));
+            } else {
+                deduped.push(stripped[i].clone());
+            }
+            count = 1;
+        }
+    }
+
+    let joined = deduped.join("\n");
+
+    // Truncate from END (most recent = most relevant)
+    let result = if joined.len() > max_chars {
+        let start = joined.len() - max_chars;
+        // Find next newline to avoid mid-line cut
+        let actual_start = joined[start..].find('\n')
+            .map(|p| start + p + 1)
+            .unwrap_or(start);
+        format!("... (truncated)\n{}", &joined[actual_start..])
+    } else {
+        joined
+    };
+
+    (result, original_len)
+}
+
+// ============================================================================
+// Tool Catalog for dynamic discovery
+// ============================================================================
+
+static TOOL_CATALOG: &[(&str, &str, &str)] = &[
+    // OBSERVE
+    ("android_get_ui_tree", "Get UI tree of current screen with element IDs, text, bounds", "observe"),
+    ("android_screenshot", "Capture screenshot as MCP image content", "observe"),
+    ("android_find_elements", "Find elements by text/resource_id/content_desc/class", "observe"),
+    ("android_get_foreground_app", "Get current app package and activity name", "observe"),
+    ("android_get_screen_context", "Snapshot: app info + UI tree + thumbnail in one call", "observe"),
+    ("android_get_clipboard", "Get clipboard text content", "observe"),
+    ("android_get_notifications", "Get recent notification events", "observe"),
+    ("android_get_device_info", "Get device model, OS version, screen size", "observe"),
+    ("android_get_recent_toasts", "Get recent toast messages", "observe"),
+    // ACT
+    ("android_tap", "Tap at coordinates or on element by selector", "act"),
+    ("android_long_press", "Long press at coordinates or on element", "act"),
+    ("android_swipe", "Swipe between coordinates (duration_ms < 200 = fling)", "act"),
+    ("android_input_text", "Type text into focused field or element by selector", "act"),
+    ("android_press_key", "Press hardware key (BACK, HOME, ENTER, etc.)", "act"),
+    ("android_global_action", "System action: back, home, recents, notifications", "act"),
+    ("android_double_tap", "Double tap at coordinates or on element", "act"),
+    ("android_pinch", "Pinch zoom (scale > 1.0 = zoom in)", "act"),
+    ("android_drag", "Drag from one point to another", "act"),
+    ("android_fling", "Fling in direction (up/down/left/right)", "act"),
+    ("android_set_clipboard", "Set clipboard text", "act"),
+    ("android_pull_to_refresh", "Pull-to-refresh gesture", "act"),
+    ("android_dismiss_keyboard", "Dismiss soft keyboard", "act"),
+    // MANAGE
+    ("android_launch_app", "Launch app by package name", "manage"),
+    ("android_close_app", "Force-stop an app", "manage"),
+    ("android_open_url", "Open URL in default browser", "manage"),
+    ("android_list_apps", "List installed apps", "manage"),
+    ("android_install_app", "Install APK on device", "manage"),
+    ("android_uninstall_app", "Uninstall app by package name", "manage"),
+    ("android_clear_app_data", "Clear app data and cache", "manage"),
+    ("android_grant_permission", "Grant runtime permission to app", "manage"),
+    ("android_revoke_permission", "Revoke runtime permission from app", "manage"),
+    // DEVICE
+    ("android_list_devices", "List connected devices with status", "device"),
+    ("android_select_device", "Select device for all subsequent commands", "device"),
+    // WAIT
+    ("android_wait_for_element", "Wait for element to appear on screen", "wait"),
+    ("android_wait_for_gone", "Wait for element to disappear", "wait"),
+    ("android_wait_for_idle", "Wait for UI to become idle", "wait"),
+    ("android_scroll_to_element", "Scroll to find off-screen element", "wait"),
+    // TEST
+    ("android_capture_logcat", "Capture logcat for debugging", "test"),
+    ("android_screenshot_diff", "Compare screenshots for visual regression", "test"),
+    ("android_accessibility_audit", "Audit screen for accessibility issues", "test"),
+    ("android_enable_events", "Enable/disable event streaming", "test"),
+    // META
+    ("android_search_tools", "Search for tools by keyword or category", "meta"),
+    ("android_describe_tools", "Get detailed descriptions of specific tools", "meta"),
+];
+
 // ============================================================================
 // NeuralBridge MCP Server
 // ============================================================================
 
 #[derive(Clone)]
 pub struct NeuralBridgeServer {
-    #[allow(dead_code)]
     state: Arc<AppState>,
     tool_router: ToolRouter<Self>,
 }
@@ -779,7 +935,9 @@ impl ServerHandler for NeuralBridgeServer {
             instructions: Some(
                 "NeuralBridge: AI-native Android automation. \
                  Provides tools for UI observation, gesture control, \
-                 app management, and device interaction."
+                 app management, and device interaction. \
+                 Token-optimized responses enabled by default (compact tree, filtered elements, compact bounds). \
+                 Use --no-* flags to disable specific optimizations."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
@@ -791,9 +949,16 @@ impl ServerHandler for NeuralBridgeServer {
 #[tool_router]
 impl NeuralBridgeServer {
     pub fn new(state: Arc<AppState>) -> Self {
+        let mut router = Self::tool_router();
+        if state.config().consolidate {
+            router.remove_route("android_fling");
+            router.remove_route("android_pull_to_refresh");
+            router.remove_route("android_dismiss_keyboard");
+            router.remove_route("android_get_foreground_app");
+        }
         Self {
             state,
-            tool_router: Self::tool_router(),
+            tool_router: router,
         }
     }
 
@@ -834,6 +999,42 @@ impl NeuralBridgeServer {
             .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
 
         Ok((output, new_width, new_height))
+    }
+
+    /// Format a UI element as compact JSON, omitting empty/false fields
+    fn format_element(e: &pb::UiElement, cfg: &ResponseFormatConfig) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".into(), serde_json::json!(e.element_id));
+        if !e.resource_id.is_empty() {
+            obj.insert("resource_id".into(), serde_json::json!(e.resource_id));
+        }
+        if !e.class_name.is_empty() && !matches!(e.class_name.as_str(),
+            "android.view.View" | "android.view.ViewGroup" |
+            "android.widget.FrameLayout" | "android.widget.LinearLayout" |
+            "android.widget.RelativeLayout") {
+            obj.insert("class".into(), serde_json::json!(e.class_name));
+        }
+        if !e.text.is_empty() {
+            obj.insert("text".into(), serde_json::json!(e.text));
+        }
+        if !e.content_description.is_empty() {
+            obj.insert("desc".into(), serde_json::json!(e.content_description));
+        }
+        if let Some(b) = &e.bounds {
+            if cfg.compact_bounds {
+                obj.insert("bounds".into(), serde_json::json!([b.left, b.top, b.right, b.bottom]));
+            } else {
+                obj.insert("bounds".into(), serde_json::json!({
+                    "left": b.left, "top": b.top, "right": b.right, "bottom": b.bottom
+                }));
+            }
+        }
+        if e.clickable { obj.insert("clickable".into(), serde_json::json!(true)); }
+        if e.focusable { obj.insert("focusable".into(), serde_json::json!(true)); }
+        if e.checkable { obj.insert("checkable".into(), serde_json::json!(true)); }
+        if e.scrollable { obj.insert("scrollable".into(), serde_json::json!(true)); }
+        if !e.semantic_type.is_empty() && e.semantic_type != "0" { obj.insert("type".into(), serde_json::json!(e.semantic_type)); }
+        serde_json::Value::Object(obj)
     }
 
     // ========================================================================
@@ -884,34 +1085,68 @@ impl NeuralBridgeServer {
             )])),
         };
 
-        // Convert to JSON
-        let result = serde_json::json!({
-            "success": true,
-            "elements": ui_tree.elements.iter().map(|e| {
-                serde_json::json!({
-                    "element_id": e.element_id,
-                    "resource_id": e.resource_id,
-                    "class_name": e.class_name,
-                    "text": e.text,
-                    "content_description": e.content_description,
-                    "bounds": {
-                        "left": e.bounds.as_ref().map(|b| b.left).unwrap_or(0),
-                        "top": e.bounds.as_ref().map(|b| b.top).unwrap_or(0),
-                        "right": e.bounds.as_ref().map(|b| b.right).unwrap_or(0),
-                        "bottom": e.bounds.as_ref().map(|b| b.bottom).unwrap_or(0),
-                    },
-                    "visible": e.visible,
-                    "enabled": e.enabled,
-                    "clickable": e.clickable,
-                    "semantic_type": e.semantic_type,
-                })
-            }).collect::<Vec<_>>(),
-            "foreground_app": ui_tree.foreground_app,
-            "total_nodes": ui_tree.total_nodes,
-            "latency_ms": response.latency_ms,
-        });
+        // Apply element filtering
+        let cfg = self.state.config();
+        let filter_mode = params.filter.as_deref().unwrap_or(
+            if cfg.filter_elements { "interactive" } else { "all" }
+        );
+        let elements_to_show: Vec<_> = ui_tree.elements.iter().filter(|e| match filter_mode {
+            "all" => true,
+            "text" => !e.text.is_empty() || !e.content_description.is_empty(),
+            _ => e.clickable || e.focusable || e.scrollable || e.checkable
+                 || !e.text.is_empty() || !e.content_description.is_empty(),
+        }).collect();
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        if cfg.compact_tree {
+            // Compact tabular format
+            let mut table = String::from("IDX | resource_id | text | desc | flags | bounds\n");
+            let mut index_map = serde_json::Map::new();
+            for (idx, e) in elements_to_show.iter().enumerate() {
+                let flags = format!("{}{}{}{}",
+                    if e.clickable { "c" } else { "" },
+                    if e.focusable { "f" } else { "" },
+                    if e.scrollable { "s" } else { "" },
+                    if e.checkable { "k" } else { "" },
+                );
+                let bounds_str = e.bounds.as_ref()
+                    .map(|b| format!("[{},{},{},{}]", b.left, b.top, b.right, b.bottom))
+                    .unwrap_or_default();
+                table.push_str(&format!("{} | {} | {} | {} | {} | {}\n",
+                    idx,
+                    e.resource_id,
+                    e.text,
+                    e.content_description,
+                    flags,
+                    bounds_str,
+                ));
+                index_map.insert(idx.to_string(), serde_json::json!(e.element_id));
+            }
+
+            let result = serde_json::json!({
+                "format": "compact",
+                "app": ui_tree.foreground_app,
+                "total": ui_tree.total_nodes,
+                "shown": elements_to_show.len(),
+                "filter": filter_mode,
+                "elements": table.trim_end(),
+                "index_map": serde_json::Value::Object(index_map),
+                "latency_ms": response.latency_ms,
+            });
+            Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        } else {
+            // Verbose JSON format
+            let result = serde_json::json!({
+                "elements": elements_to_show.iter().map(|e| {
+                    Self::format_element(e, cfg)
+                }).collect::<Vec<_>>(),
+                "foreground_app": ui_tree.foreground_app,
+                "total_nodes": ui_tree.total_nodes,
+                "shown": elements_to_show.len(),
+                "filter": filter_mode,
+                "latency_ms": response.latency_ms,
+            });
+            Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        }
     }
 
     #[tool(
@@ -1118,25 +1353,10 @@ impl NeuralBridgeServer {
         };
 
         // Convert to JSON
+        let cfg = self.state.config();
         let result = serde_json::json!({
-            "success": true,
             "elements": element_list.elements.iter().map(|e| {
-                serde_json::json!({
-                    "element_id": e.element_id,
-                    "resource_id": e.resource_id,
-                    "class_name": e.class_name,
-                    "text": e.text,
-                    "content_description": e.content_description,
-                    "bounds": {
-                        "left": e.bounds.as_ref().map(|b| b.left).unwrap_or(0),
-                        "top": e.bounds.as_ref().map(|b| b.top).unwrap_or(0),
-                        "right": e.bounds.as_ref().map(|b| b.right).unwrap_or(0),
-                        "bottom": e.bounds.as_ref().map(|b| b.bottom).unwrap_or(0),
-                    },
-                    "visible": e.visible,
-                    "enabled": e.enabled,
-                    "clickable": e.clickable,
-                })
+                Self::format_element(e, cfg)
             }).collect::<Vec<_>>(),
             "total_matches": element_list.total_matches,
             "latency_ms": response.latency_ms,
@@ -1184,7 +1404,7 @@ impl NeuralBridgeServer {
 
         // Convert to JSON
         let result = serde_json::json!({
-            "success": true,
+
             "package_name": app_info.package_name,
             "activity_name": app_info.activity_name,
             "is_launcher": app_info.is_launcher,
@@ -1231,25 +1451,9 @@ impl NeuralBridgeServer {
         let conn = self.state.get_connection().await
             .map_err(to_mcp_error)?;
 
-        // Step 1: Get foreground app info
-        let app_request = Request {
-            request_id: Uuid::new_v4().to_string(),
-            command: Some(Command::GetForegroundApp(pb::GetForegroundAppRequest {})),
-        };
-
-        let app_response = conn.send_request(app_request).await
-            .map_err(to_mcp_error)?;
-
-        let app_info = match app_response.result {
-            Some(pb::response::Result::AppInfo(info)) => info,
-            _ => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "Failed to get foreground app info".to_string()
-                )]));
-            }
-        };
-
-        // Step 2: Get UI tree (visible elements only)
+        // Step 1: Get UI tree (visible elements only).
+        // UITree already carries the foreground_app package name, so we skip a
+        // separate GetForegroundApp round-trip, reducing serial RPCs from 3 → 2.
         let tree_request = Request {
             request_id: Uuid::new_v4().to_string(),
             command: Some(Command::GetUiTree(pb::GetUiTreeRequest {
@@ -1271,7 +1475,7 @@ impl NeuralBridgeServer {
             }
         };
 
-        // Step 3: Get thumbnail screenshot
+        // Step 2: Get thumbnail screenshot
         let screenshot_request = Request {
             request_id: Uuid::new_v4().to_string(),
             command: Some(Command::Screenshot(pb::ScreenshotRequest {
@@ -1293,44 +1497,24 @@ impl NeuralBridgeServer {
         };
 
         // Step 4: Filter elements to interactive/text elements (unless include_all is true)
+        let cfg = self.state.config();
         let filtered_elements: Vec<_> = ui_tree.elements.iter()
             .filter(|e| {
                 if include_all {
                     true
                 } else {
-                    // Include interactive elements or text-bearing elements
                     e.clickable || e.focusable || e.checkable || e.scrollable || !e.text.is_empty()
                 }
             })
             .map(|e| {
-                // Calculate center coordinates
-                let bounds = e.bounds.as_ref();
-                let center_x = bounds.map(|b| (b.left + b.right) / 2).unwrap_or(0);
-                let center_y = bounds.map(|b| (b.top + b.bottom) / 2).unwrap_or(0);
-
-                serde_json::json!({
-                    "element_id": e.element_id,
-                    "resource_id": e.resource_id,
-                    "class_name": e.class_name,
-                    "text": e.text,
-                    "content_description": e.content_description,
-                    "bounds": bounds.map(|b| serde_json::json!({
-                        "left": b.left,
-                        "top": b.top,
-                        "right": b.right,
-                        "bottom": b.bottom,
-                    })),
-                    "center": {
-                        "x": center_x,
-                        "y": center_y,
-                    },
-                    "clickable": e.clickable,
-                    "focusable": e.focusable,
-                    "checkable": e.checkable,
-                    "scrollable": e.scrollable,
-                    "enabled": e.enabled,
-                    "visible": e.visible,
-                })
+                let mut elem = Self::format_element(e, cfg);
+                // Add center coordinates for screen context
+                if let Some(b) = &e.bounds {
+                    let obj = elem.as_object_mut().unwrap();
+                    obj.insert("center_x".into(), serde_json::json!((b.left + b.right) / 2));
+                    obj.insert("center_y".into(), serde_json::json!((b.top + b.bottom) / 2));
+                }
+                elem
             })
             .collect();
 
@@ -1342,12 +1526,11 @@ impl NeuralBridgeServer {
         // Encode screenshot as base64
         let base64_screenshot = base64::engine::general_purpose::STANDARD.encode(&final_data);
 
-        // Step 6: Build comprehensive response
+        // Step 3: Build comprehensive response
+        // foreground_app is sourced from UITree (already embedded), avoiding a separate RPC.
         let metadata = serde_json::json!({
             "app_info": {
-                "package_name": app_info.package_name,
-                "activity_name": app_info.activity_name,
-                "is_launcher": app_info.is_launcher,
+                "package_name": ui_tree.foreground_app,
             },
             "ui_tree": {
                 "total_elements": ui_tree.total_nodes,
@@ -1461,7 +1644,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "latency_ms": response.latency_ms,
         });
 
@@ -1538,7 +1721,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "latency_ms": response.latency_ms,
         });
 
@@ -1589,7 +1772,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "latency_ms": response.latency_ms,
         });
 
@@ -1663,7 +1846,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "latency_ms": response.latency_ms,
         });
 
@@ -1711,7 +1894,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "latency_ms": response.latency_ms,
         });
 
@@ -1762,7 +1945,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "latency_ms": response.latency_ms,
         });
 
@@ -1817,7 +2000,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "latency_ms": response.latency_ms,
         });
 
@@ -1894,7 +2077,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "latency_ms": response.latency_ms,
         });
 
@@ -1961,7 +2144,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "key": params.key,
             "latency_ms": response.latency_ms,
         });
@@ -2020,7 +2203,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "action": params.action,
             "latency_ms": response.latency_ms,
         });
@@ -2087,7 +2270,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "package_name": params.package_name,
             "latency_ms": response.latency_ms,
         });
@@ -2121,7 +2304,7 @@ impl NeuralBridgeServer {
 
             // Return success result
             let result = serde_json::json!({
-                "success": true,
+    
                 "package_name": params.package_name,
                 "method": "adb_force_stop",
             });
@@ -2151,7 +2334,7 @@ impl NeuralBridgeServer {
             }
 
             let result = serde_json::json!({
-                "success": true,
+    
                 "package_name": params.package_name,
                 "method": "graceful",
                 "latency_ms": response.latency_ms,
@@ -2183,7 +2366,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "package_name": params.package_name,
             "message": "App data cleared successfully",
         });
@@ -2251,7 +2434,7 @@ impl NeuralBridgeServer {
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to install APK: {}", e)))?;
 
         let result = serde_json::json!({
-            "success": true,
+
             "apk_path": params.apk_path,
             "replace": replace,
             "message": "APK installed successfully",
@@ -2282,7 +2465,7 @@ impl NeuralBridgeServer {
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to uninstall app: {}", e)))?;
 
         let result = serde_json::json!({
-            "success": true,
+
             "package_name": params.package_name,
             "keep_data": keep_data,
             "message": "App uninstalled successfully",
@@ -2312,7 +2495,7 @@ impl NeuralBridgeServer {
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to grant permission: {}", e)))?;
 
         let result = serde_json::json!({
-            "success": true,
+
             "package_name": params.package_name,
             "permission": params.permission,
             "message": "Permission granted successfully",
@@ -2342,7 +2525,7 @@ impl NeuralBridgeServer {
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to revoke permission: {}", e)))?;
 
         let result = serde_json::json!({
-            "success": true,
+
             "package_name": params.package_name,
             "permission": params.permission,
             "message": "Permission revoked successfully",
@@ -2388,7 +2571,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "url": params.url,
             "latency_ms": response.latency_ms,
         });
@@ -2452,7 +2635,7 @@ impl NeuralBridgeServer {
             // Timeout is not an error, just return found=false
             if response.error_code == pb::ErrorCode::Timeout as i32 {
                 let result = serde_json::json!({
-                    "success": true,
+        
                     "found": false,
                     "elapsed_ms": response.latency_ms,
                     "reason": "timeout",
@@ -2469,7 +2652,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "found": true,
             "elapsed_ms": response.latency_ms,
         });
@@ -2529,7 +2712,7 @@ impl NeuralBridgeServer {
             // Timeout means element is still visible
             if response.error_code == pb::ErrorCode::Timeout as i32 {
                 let result = serde_json::json!({
-                    "success": true,
+        
                     "found": true,
                     "elapsed_ms": response.latency_ms,
                     "reason": "timeout",
@@ -2546,7 +2729,7 @@ impl NeuralBridgeServer {
 
         // Return success result (element is gone)
         let result = serde_json::json!({
-            "success": true,
+
             "found": false,
             "elapsed_ms": response.latency_ms,
             "message": "Element disappeared successfully",
@@ -2586,7 +2769,7 @@ impl NeuralBridgeServer {
             // Timeout is not an error, just return idle=false
             if response.error_code == pb::ErrorCode::Timeout as i32 {
                 let result = serde_json::json!({
-                    "success": true,
+        
                     "idle": false,
                     "elapsed_ms": response.latency_ms,
                     "reason": "timeout"
@@ -2602,7 +2785,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "idle": true,
             "elapsed_ms": response.latency_ms,
         });
@@ -2665,19 +2848,21 @@ impl NeuralBridgeServer {
             if let Some(pb::response::Result::ElementList(element_list)) = response.result {
                 if !element_list.elements.is_empty() {
                     let element = &element_list.elements[0];
+                    let cfg = self.state.config();
+                    let bounds_val = element.bounds.as_ref().map(|b| {
+                        if cfg.compact_bounds {
+                            serde_json::json!([b.left, b.top, b.right, b.bottom])
+                        } else {
+                            serde_json::json!({"left": b.left, "top": b.top, "right": b.right, "bottom": b.bottom})
+                        }
+                    });
                     let result = serde_json::json!({
-                        "success": true,
                         "found": true,
                         "scrolls": 0,
                         "elapsed_ms": start_time.elapsed().as_millis() as i64,
                         "element": {
                             "element_id": element.element_id,
-                            "bounds": element.bounds.as_ref().map(|b| serde_json::json!({
-                                "left": b.left,
-                                "top": b.top,
-                                "right": b.right,
-                                "bottom": b.bottom,
-                            })),
+                            "bounds": bounds_val,
                         },
                     });
                     return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
@@ -2698,7 +2883,7 @@ impl NeuralBridgeServer {
         };
 
         // Step 3: Scroll loop
-        let mut previous_hash: Option<u64> = None;
+        let mut previous_ids: Option<Vec<String>> = None;
         let mut scroll_count = 0;
 
         for _i in 0..max_scrolls {
@@ -2756,19 +2941,21 @@ impl NeuralBridgeServer {
                 if let Some(pb::response::Result::ElementList(element_list)) = response.result {
                     if !element_list.elements.is_empty() {
                         let element = &element_list.elements[0];
+                        let cfg = self.state.config();
+                        let bounds_val = element.bounds.as_ref().map(|b| {
+                            if cfg.compact_bounds {
+                                serde_json::json!([b.left, b.top, b.right, b.bottom])
+                            } else {
+                                serde_json::json!({"left": b.left, "top": b.top, "right": b.right, "bottom": b.bottom})
+                            }
+                        });
                         let result = serde_json::json!({
-                            "success": true,
                             "found": true,
                             "scrolls": scroll_count,
                             "elapsed_ms": start_time.elapsed().as_millis() as i64,
                             "element": {
                                 "element_id": element.element_id,
-                                "bounds": element.bounds.as_ref().map(|b| serde_json::json!({
-                                    "left": b.left,
-                                    "top": b.top,
-                                    "right": b.right,
-                                    "bottom": b.bottom,
-                                })),
+                                "bounds": bounds_val,
                             },
                         });
                         return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
@@ -2791,21 +2978,18 @@ impl NeuralBridgeServer {
 
             if response.success {
                 if let Some(pb::response::Result::UiTree(ui_tree)) = response.result {
-                    // Compute hash of visible element IDs
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-
-                    let mut hasher = DefaultHasher::new();
-                    for element in &ui_tree.elements {
-                        if element.visible {
-                            element.element_id.hash(&mut hasher);
-                        }
-                    }
-                    let current_hash = hasher.finish();
+                    // Collect sorted visible element IDs for deterministic change detection.
+                    // DefaultHasher is explicitly not stable across builds, so we use a
+                    // sorted Vec comparison instead.
+                    let mut current_ids: Vec<String> = ui_tree.elements.iter()
+                        .filter(|e| e.visible)
+                        .map(|e| e.element_id.clone())
+                        .collect();
+                    current_ids.sort_unstable();
 
                     // Step 3e: Check if we've reached the end
-                    if let Some(prev_hash) = previous_hash {
-                        if current_hash == prev_hash {
+                    if let Some(ref prev_ids) = previous_ids {
+                        if &current_ids == prev_ids {
                             // End of scroll reached
                             let result = serde_json::json!({
                                 "success": false,
@@ -2819,7 +3003,7 @@ impl NeuralBridgeServer {
                         }
                     }
 
-                    previous_hash = Some(current_hash);
+                    previous_ids = Some(current_ids);
                 }
             }
         }
@@ -2889,7 +3073,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "enabled": params.enable,
             "latency_ms": response.latency_ms,
         });
@@ -2941,7 +3125,7 @@ impl NeuralBridgeServer {
 
         // Convert to JSON
         let result = serde_json::json!({
-            "success": true,
+
             "notifications": notification_list.notifications.iter().map(|n| {
                 serde_json::json!({
                     "package_name": n.package_name,
@@ -2982,7 +3166,7 @@ impl NeuralBridgeServer {
 
         // Return result
         let result = serde_json::json!({
-            "success": true,
+
             "text": clipboard_text,
             "has_content": !clipboard_text.is_empty(),
             "method": "adb",
@@ -3027,7 +3211,7 @@ impl NeuralBridgeServer {
 
         // Return success result
         let result = serde_json::json!({
-            "success": true,
+
             "text_length": params.text.len(),
             "latency_ms": response.latency_ms,
         });
@@ -3069,11 +3253,16 @@ impl NeuralBridgeServer {
         ).await
         .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to capture logcat: {}", e)))?;
 
+        // Compress logcat output
+        let (compressed_log, original_chars) = compress_logcat(&log_output, 8000);
+        let compressed_chars = compressed_log.len();
+
         // Return result
         let result = serde_json::json!({
-            "success": true,
-            "log": log_output,
-            "lines_returned": log_output.lines().count(),
+            "log": compressed_log,
+            "lines_returned": compressed_log.lines().count(),
+            "original_chars": original_chars,
+            "compressed_chars": compressed_chars,
             "package": params.package,
             "level": level,
             "crash_only": crash_only,
@@ -3140,7 +3329,7 @@ impl NeuralBridgeServer {
         // Check dimensions match
         if reference_img.dimensions() != current_img.dimensions() {
             let result = serde_json::json!({
-                "success": true,
+    
                 "match": false,
                 "similarity": 0.0,
                 "reference_dimensions": {
@@ -3176,7 +3365,7 @@ impl NeuralBridgeServer {
         let is_match = similarity >= threshold;
 
         let result = serde_json::json!({
-            "success": true,
+
             "match": is_match,
             "similarity": similarity,
             "threshold": threshold,
@@ -3202,7 +3391,7 @@ impl NeuralBridgeServer {
         let since_ms = params.since_ms.unwrap_or(5000);
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as i64;
         let cutoff_time = current_time - since_ms;
 
@@ -3226,7 +3415,7 @@ impl NeuralBridgeServer {
             .collect();
 
         let result = serde_json::json!({
-            "success": true,
+
             "toasts": toasts,
             "total_count": toasts.len(),
             "since_ms": since_ms,
@@ -3278,7 +3467,7 @@ impl NeuralBridgeServer {
             .map_err(to_mcp_error)?;
 
         let result = serde_json::json!({
-            "success": true,
+
             "latency_ms": response.latency_ms,
         });
 
@@ -3315,7 +3504,7 @@ impl NeuralBridgeServer {
         }
 
         let result = serde_json::json!({
-            "success": true,
+
             "latency_ms": response.latency_ms,
         });
 
@@ -3427,7 +3616,7 @@ impl NeuralBridgeServer {
         }
 
         let result = serde_json::json!({
-            "success": true,
+
             "total_elements": ui_tree.elements.len(),
             "interactive_elements": ui_tree.elements.iter().filter(|e| e.clickable).count(),
             "violations": violations,
@@ -3435,6 +3624,73 @@ impl NeuralBridgeServer {
             "score": if violations.is_empty() { "Pass" } else { "Fail" },
         });
 
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
+    // META tools (dynamic tool discovery)
+    // ========================================================================
+
+    #[tool(
+        name = "android_search_tools",
+        description = "Search available tools by keyword or category. Returns matching tools ranked by relevance. Categories: observe, act, manage, wait, test."
+    )]
+    async fn android_search_tools(
+        &self,
+        Parameters(params): Parameters<SearchToolsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let query = params.query.to_lowercase();
+        let category_filter = params.category.as_deref().map(|c| c.to_lowercase());
+
+        let mut results: Vec<(&str, &str, &str, usize)> = TOOL_CATALOG.iter()
+            .filter(|(_, _, cat)| {
+                category_filter.as_ref().map_or(true, |f| cat == f)
+            })
+            .filter_map(|(name, desc, cat)| {
+                let name_lower = name.to_lowercase();
+                let desc_lower = desc.to_lowercase();
+                // Score: exact name match > name contains > desc contains
+                let score = if name_lower.contains(&query) { 2 }
+                    else if desc_lower.contains(&query) { 1 }
+                    else { return None };
+                Some((*name, *desc, *cat, score))
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.3.cmp(&a.3));
+
+        let tools_json: Vec<_> = results.iter().map(|(name, desc, cat, _)| {
+            serde_json::json!({"name": name, "description": desc, "category": cat})
+        }).collect();
+
+        let result = serde_json::json!({
+            "matches": tools_json.len(),
+            "tools": tools_json,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    #[tool(
+        name = "android_describe_tools",
+        description = "Get detailed descriptions for specific tools. Pass tool names to get their full descriptions and parameter info."
+    )]
+    async fn android_describe_tools(
+        &self,
+        Parameters(params): Parameters<DescribeToolsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let descriptions: Vec<_> = params.tools.iter().map(|name| {
+            match TOOL_CATALOG.iter().find(|(n, _, _)| *n == name.as_str()) {
+                Some((n, desc, cat)) => serde_json::json!({
+                    "name": n, "description": desc, "category": cat, "found": true
+                }),
+                None => serde_json::json!({
+                    "name": name, "found": false, "suggestion": "Use android_search_tools to find available tools"
+                }),
+            }
+        }).collect();
+
+        let result = serde_json::json!({ "tools": descriptions });
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
@@ -3639,7 +3895,7 @@ impl NeuralBridgeServer {
                     .unwrap_or_else(|| "Unknown".to_string());
 
                 let result = serde_json::json!({
-                    "success": true,
+        
                     "device_id": params.device_id,
                     "model": model,
                     "companion_status": "connected",
@@ -3683,6 +3939,7 @@ async fn main() -> Result<()> {
     let mut auto_discover = false;
     let mut check_mode = false;
     let mut enable_permissions = false;
+    let mut response_config = ResponseFormatConfig::default();
 
     let mut i = 1;
     while i < args.len() {
@@ -3699,6 +3956,10 @@ async fn main() -> Result<()> {
             "--auto-discover" => auto_discover = true,
             "--check" => check_mode = true,
             "--enable-permissions" => enable_permissions = true,
+            "--no-compact-tree" => response_config.compact_tree = false,
+            "--no-filter-elements" => response_config.filter_elements = false,
+            "--no-compact-bounds" => response_config.compact_bounds = false,
+            "--no-consolidate" => response_config.consolidate = false,
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());
@@ -3773,7 +4034,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let app_state = Arc::new(AppState::new(device_manager));
+    let app_state = Arc::new(AppState::new(device_manager, response_config));
 
     if let Some(ref selected) = device_id {
         *app_state.device_id.write().await = Some(selected.clone());
@@ -3908,6 +4169,15 @@ fn print_usage() {
     eprintln!("  --check                 Run setup verification and show device status");
     eprintln!("  --help, -h              Show this help message");
     eprintln!();
+    eprintln!("Token optimization flags (all ON by default):");
+    eprintln!("  --no-compact-tree       Disable compact tabular UI tree format");
+    eprintln!("  --no-filter-elements    Disable interactive-elements-only filter in get_ui_tree");
+    eprintln!("  --no-compact-bounds     Disable [l,t,r,b] compact bounds format");
+    eprintln!("  --no-omit-empty         Disable omission of empty/false fields in responses");
+    eprintln!("  --no-strip-success      Disable removal of redundant success:true from responses");
+    eprintln!("  --no-consolidate        Disable tool consolidation (re-exposes fling, pull_to_refresh, dismiss_keyboard, get_foreground_app)");
+    eprintln!("  --tool-mode dynamic     Enable dynamic tool discovery meta-tools");
+    eprintln!();
     eprintln!("Note: All options are optional. Without --device or --auto-discover,");
     eprintln!("the server starts without a device. AI agents can then use");
     eprintln!("android_list_devices and android_select_device tools at runtime.");
@@ -3916,6 +4186,7 @@ fn print_usage() {
     eprintln!("  neuralbridge-mcp --auto-discover --enable-permissions");
     eprintln!("  neuralbridge-mcp --device emulator-5554");
     eprintln!("  neuralbridge-mcp --check");
+    eprintln!("  neuralbridge-mcp --no-compact-tree --no-filter-elements  # Disable optimizations");
     eprintln!("  neuralbridge-mcp    # Start without device, select at runtime");
 }
 

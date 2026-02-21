@@ -353,31 +353,20 @@ impl AdbExecutor {
         Ok(output.trim().to_string())
     }
 
-    /// Validate clipboard text for shell safety
-    fn validate_clipboard_text(text: &str) -> Result<()> {
-        if text.is_empty() {
-            return Ok(());
-        }
-        // Check for shell metacharacters that could lead to command injection
-        let dangerous_chars = ['$', '`', '\\', '|', '&', ';', '<', '>', '(', ')', '{', '}', '\n', '\r'];
-        if text.chars().any(|c| dangerous_chars.contains(&c)) {
-            bail!("Clipboard text contains potentially dangerous shell metacharacters");
-        }
-        Ok(())
-    }
-
     /// Set clipboard content
     pub async fn set_clipboard(&self, device_id: &str, text: &str) -> Result<()> {
-        // Validate clipboard text for shell safety
-        Self::validate_clipboard_text(text)?;
-
         debug!("Setting clipboard content on device {}", device_id);
 
-        // Note: cmd clipboard set-text doesn't work reliably on all Android versions
-        // Alternative: Use am broadcast with ClipboardManager
+        // Shell-escape text using single-quote enclosure to prevent Android shell injection.
+        // Single quotes within the text are escaped via the '\'' idiom (close quote, escaped
+        // single quote, reopen quote). This supports any text including $, \, newlines, etc.
+        let escaped = format!("'{}'", text.replace('\'', r"'\''"));
+        let shell_cmd = format!("cmd clipboard set-text {}", escaped);
+
         self.execute_command(&[
             "-s", device_id,
-            "shell", "cmd", "clipboard", "set-text", text
+            "shell",
+            &shell_cmd,
         ]).await?;
 
         Ok(())
@@ -654,22 +643,27 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_clipboard_text_safe() {
-        assert!(AdbExecutor::validate_clipboard_text("Hello World").is_ok());
-        assert!(AdbExecutor::validate_clipboard_text("Test text with spaces!").is_ok());
-        assert!(AdbExecutor::validate_clipboard_text("").is_ok());
-        assert!(AdbExecutor::validate_clipboard_text("email@example.com").is_ok());
-    }
+    fn test_clipboard_shell_escaping() {
+        // Verify the single-quote escape idiom handles dangerous characters safely.
+        // set_clipboard now wraps text in single quotes and escapes embedded single quotes.
+        let escape = |text: &str| -> String {
+            format!("'{}'", text.replace('\'', r"'\''"))
+        };
 
-    #[test]
-    fn test_validate_clipboard_text_dangerous() {
-        // Shell metacharacters
-        assert!(AdbExecutor::validate_clipboard_text("text; rm -rf /").is_err());
-        assert!(AdbExecutor::validate_clipboard_text("text`whoami`").is_err());
-        assert!(AdbExecutor::validate_clipboard_text("text$(whoami)").is_err());
-        assert!(AdbExecutor::validate_clipboard_text("text | cat").is_err());
-        assert!(AdbExecutor::validate_clipboard_text("text & background").is_err());
-        assert!(AdbExecutor::validate_clipboard_text("text\nls").is_err());
-        assert!(AdbExecutor::validate_clipboard_text("text\\escape").is_err());
+        // Basic text is wrapped in single quotes
+        assert_eq!(escape("Hello World"), "'Hello World'");
+        // Single quotes are escaped via '\''
+        assert_eq!(escape("it's"), "'it'\\''s'");
+        // Shell metacharacters are safely enclosed — no special treatment needed
+        assert_eq!(escape("text; rm -rf /"), "'text; rm -rf /'");
+        assert_eq!(escape("text$(whoami)"), "'text$(whoami)'");
+        assert_eq!(escape("text | cat"), "'text | cat'");
+        assert_eq!(escape("text & bg"), "'text & bg'");
+        // Multi-line text is allowed (no longer rejected)
+        assert_eq!(escape("line1\nline2"), "'line1\nline2'");
+        // Dollar signs (e.g. in email addresses) are allowed
+        assert_eq!(escape("user@domain.com"), "'user@domain.com'");
+        // Backslashes are allowed
+        assert_eq!(escape("C:\\Users"), "'C:\\Users'");
     }
 }

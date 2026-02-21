@@ -348,6 +348,16 @@ Operations requiring shell/system privileges (must route through ADB):
 
 **Architecture Decision:** Privileged operations are intentionally routed through the MCP server's ADB connection rather than attempting them from the companion app, where they would fail silently or require dangerous root access.
 
+## Token Optimization CLI Flags (all ON by default)
+- `--no-compact-tree`: Disable compact tabular UI tree format
+- `--no-filter-elements`: Disable interactive-elements-only filter in get_ui_tree
+- `--no-compact-bounds`: Disable [l,t,r,b] compact bounds format
+- `--no-consolidate`: Disable tool consolidation (re-exposes fling, pull_to_refresh, dismiss_keyboard, get_foreground_app)
+
+Always-on (not configurable): omit-empty-fields, strip-success-true, logcat-compression, dynamic-tool-discovery meta-tools.
+
+See `docs/token-optimization.md` for detailed savings estimates.
+
 ## Common Patterns
 
 ### Adding a New MCP Tool

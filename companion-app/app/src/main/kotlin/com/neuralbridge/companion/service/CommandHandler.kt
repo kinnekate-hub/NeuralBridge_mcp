@@ -170,7 +170,7 @@ class CommandHandler(
         }
         CommandLog.add(CommandLog.Entry(
             timestamp = System.currentTimeMillis(),
-            command = commandName.lowercase().replace("_", "_"),
+            command = commandName.lowercase().replace("_", " "),
             latencyMs = latencyMs,
             success = success,
             category = category
