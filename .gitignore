@@ -12,7 +12,7 @@
 **/*.pdb
 
 # ------------------------------------------
-# Android / Gradle (companion-app, test-app)
+# Android / Gradle (companion-app)
 # ------------------------------------------
 # Gradle
 **/.gradle/
@@ -187,10 +187,10 @@ desktop.ini
 # ------------------------------------------
 # Demo & Test Outputs
 # ------------------------------------------
-screenshots/*.jpg
-screenshots/*.png
+screenshots/
 recordings/*.mp4
 test-results/
+**/test_results.txt
 performance-logs/
 tests/reports/
 

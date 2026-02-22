@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $VERSION = "1.0.0"
-$REPO = "yourorg/neuralbridge"  # TODO: Update with actual GitHub repo
+$REPO = "dondetir/neuralBridge"
 $BINARY_NAME = "neuralbridge-mcp.exe"
 
 Write-Host "NeuralBridge MCP Server Installer v$VERSION" -ForegroundColor Green

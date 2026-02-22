@@ -7,6 +7,7 @@ with the NeuralBridge MCP server (Rust) via stdio transport.
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -42,7 +43,7 @@ class NeuralBridgeMCPClient:
         ```python
         client = NeuralBridgeMCPClient(
             mcp_server_path="./mcp-server/target/release/neuralbridge-mcp",
-            device_id="emulator-5554"
+            device_id="emulator-5554"  # or set ANDROID_DEVICE_ID env var
         )
         await client.connect()
         result = await client.call_tool("android_tap", {"coordinates": {"x": 100, "y": 200}})
@@ -53,19 +54,20 @@ class NeuralBridgeMCPClient:
     def __init__(
         self,
         mcp_server_path: str,
-        device_id: str = "emulator-5554",
+        device_id: str = None,
         auto_discover: bool = False
     ):
         """Initialize MCP client.
 
         Args:
             mcp_server_path: Path to neuralbridge-mcp binary
-            device_id: Android device ID (e.g., "emulator-5554")
+            device_id: Android device ID (e.g., "emulator-5554"). Defaults to
+                ANDROID_DEVICE_ID env var, then auto-discovery.
             auto_discover: Use auto-discovery instead of specific device
         """
         self.server_path = Path(mcp_server_path).resolve()
-        self.device_id = device_id
-        self.auto_discover = auto_discover
+        self.device_id = device_id or os.environ.get("ANDROID_DEVICE_ID")
+        self.auto_discover = auto_discover or self.device_id is None
 
         # MCP session components
         self._session: Optional[ClientSession] = None

@@ -129,7 +129,7 @@ Before requesting review, verify:
 
 ## 📄 License
 
-By contributing to NeuralBridge, you agree that your contributions will be licensed under the MIT License. You must also agree to the attribution requirements stated in the LICENSE file.
+By contributing to NeuralBridge, you agree that your contributions will be licensed under the MIT License.
 
 ## 🤝 Code of Conduct
 
@@ -147,10 +147,9 @@ By contributing to NeuralBridge, you agree that your contributions will be licen
 
 ## 🙏 Attribution
 
-If you use NeuralBridge's ideas, architecture, or code:
-- Credit this repository in your documentation
-- Include a link: https://github.com/dondetir/neuralBridge
-- Mention "Built with/inspired by NeuralBridge"
+If you use NeuralBridge's ideas, architecture, or code, we'd appreciate (but don't require) a mention:
+- A link to https://github.com/dondetir/neuralBridge
+- A note like "Built with/inspired by NeuralBridge"
 
 ---
 

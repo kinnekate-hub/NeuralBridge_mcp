@@ -19,15 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-ATTRIBUTION REQUIREMENT:
-
-If you use NeuralBridge (the idea, architecture, or code) in any form or shape:
-- You MUST credit this repository: https://github.com/dondetir/neuralBridge
-- Include a notice in your documentation, README, or about section
-- Mention "Built with/inspired by NeuralBridge" or similar attribution
-
-This software is 100% FREE for commercial and personal use, as long as proper
-attribution is maintained.

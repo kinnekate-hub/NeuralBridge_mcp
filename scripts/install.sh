@@ -5,7 +5,7 @@
 set -e
 
 VERSION="1.0.0"
-REPO="yourorg/neuralbridge"  # TODO: Update with actual GitHub repo
+REPO="dondetir/neuralBridge"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="neuralbridge-mcp"
 

@@ -286,8 +286,8 @@ async def interactive_mode(
 )
 @click.option(
     "--device",
-    default="emulator-5554",
-    help="Android device ID"
+    default=None,
+    help="Android device ID (default: ANDROID_DEVICE_ID env var, or auto-discover)"
 )
 @click.option(
     "--scenario",

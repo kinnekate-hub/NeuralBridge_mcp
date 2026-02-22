@@ -463,8 +463,7 @@ MIT License - See [LICENSE](../LICENSE) for details.
 ## Support
 
 - **Documentation:** [docs/prd.md](../docs/prd.md)
-- **Issues:** [GitHub Issues](https://github.com/neuralbridge/neuralbridge/issues)
-- **Discord:** [Join our community](https://discord.gg/neuralbridge)
+- **Issues:** [GitHub Issues](https://github.com/dondetir/neuralBridge/issues)
 
 ## Acknowledgments
 

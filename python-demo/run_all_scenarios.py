@@ -2,6 +2,7 @@
 """Headless test runner for all demo scenarios"""
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -35,7 +36,7 @@ SCENARIOS = {
 async def main():
     """Run all scenarios headless"""
     mcp_server_path = Path("../mcp-server/target/release/neuralbridge-mcp").resolve()
-    device_id = "emulator-5554"
+    device_id = os.environ.get("ANDROID_DEVICE_ID")  # None = auto-discover
     screenshot_dir = Path("../screenshots").resolve()
     screenshot_dir.mkdir(parents=True, exist_ok=True)
 

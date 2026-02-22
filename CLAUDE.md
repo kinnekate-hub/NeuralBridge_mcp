@@ -274,7 +274,7 @@ All errors returned to AI agents must be **actionable**. Error codes include:
 
 ## Development Phases
 
-**Current Status:** Phase 0 (Architecture finalized, implementation starting)
+**Current Status:** Phase 3 Complete — 43 tools shipped, Phase 4 (multi-device, WebView) next
 
 1. **Phase 1 (Weeks 1-6):** Core MVP - 15 essential tools, single device, basic gestures
 2. **Phase 2 (Weeks 7-9):** Full gesture suite, text selection, notifications
@@ -493,10 +493,8 @@ Theme resources are in `companion-app/app/src/main/res/values/`:
 
 ## Workflow Conventions
 
-- Always use project-defined skills (`/bugfix`, `/plan-review`, `/smart-commit`) for workflows that have custom skills
-- Do NOT fall back to raw bash commands when a skill exists for the task
 - **Build verification after ANY code change** before reporting completion
-- Use `/debug-agents` for complex multi-subsystem bugs requiring parallel investigation
+- Run `cargo test` and `./gradlew assembleDebug` after changes — never report done without verifying
 
 ## Language & Platform Notes
 
