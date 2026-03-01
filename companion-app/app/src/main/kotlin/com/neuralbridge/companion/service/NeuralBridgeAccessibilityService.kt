@@ -16,8 +16,12 @@ import androidx.core.app.NotificationCompat
 import com.neuralbridge.companion.R
 import com.neuralbridge.companion.network.TcpServer
 import com.neuralbridge.companion.gesture.GestureEngine
+import com.neuralbridge.companion.input.InputEngine
 import com.neuralbridge.companion.uitree.UiTreeWalker
 import com.neuralbridge.companion.screenshot.ScreenshotPipeline
+import com.neuralbridge.companion.mcp.McpAuthManager
+import com.neuralbridge.companion.mcp.McpHttpServer
+import com.neuralbridge.companion.mcp.McpToolHandler
 import kotlinx.coroutines.*
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
@@ -53,6 +57,12 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         @Volatile
         var instance: NeuralBridgeAccessibilityService? = null
             private set
+
+        /**
+         * Static toast buffer for McpToolHandler.handleGetRecentToasts().
+         * CopyOnWriteArrayList is thread-safe for concurrent reads from MCP HTTP handler.
+         */
+        val recentToasts = java.util.concurrent.CopyOnWriteArrayList<Pair<String, Long>>()
     }
 
     // Coroutine scope for service lifecycle
@@ -61,8 +71,12 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     // Core components
     private lateinit var tcpServer: TcpServer
     private lateinit var gestureEngine: GestureEngine
+    private lateinit var inputEngine: InputEngine
     private lateinit var uiTreeWalker: UiTreeWalker
     private lateinit var screenshotPipeline: ScreenshotPipeline
+
+    // MCP HTTP server
+    private var mcpHttpServer: McpHttpServer? = null
 
     // Event listener for UI changes
     private val eventListeners = mutableListOf<AccessibilityEventListener>()
@@ -92,10 +106,11 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         // Publish instance before conditional startup so MainActivity can query it
         instance = this
 
-        // Only start foreground service, TCP server, and screen recording if toggle is on
+        // Only start foreground service, TCP server, HTTP server, and screen recording if toggle is on
         if (isEnabled()) {
             startForegroundService()
             startTcpServer()
+            startMcpHttpServer()
             requestMediaProjectionPermission()
         }
 
@@ -117,10 +132,38 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
      */
     private fun initializeComponents() {
         gestureEngine = GestureEngine(this)
+        inputEngine = InputEngine(this)
         uiTreeWalker = UiTreeWalker(this)
         screenshotPipeline = ScreenshotPipeline(this, serviceScope)
 
         Log.d(TAG, "Core components initialized")
+    }
+
+    /**
+     * Start MCP HTTP server (JSON-RPC over HTTP, port 7474)
+     */
+    private fun startMcpHttpServer() {
+        val authManager = McpAuthManager(this)
+        val toolHandler = McpToolHandler(
+            service = this,
+            gestureEngine = gestureEngine,
+            uiTreeWalker = uiTreeWalker,
+            inputEngine = inputEngine,
+            screenshotPipeline = screenshotPipeline
+        )
+        val server = McpHttpServer(
+            context = this,
+            toolHandler = toolHandler,
+            authManager = authManager
+        )
+        mcpHttpServer = server
+        serviceScope.launch {
+            try {
+                server.start()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start MCP HTTP server", e)
+            }
+        }
     }
 
     /**
@@ -307,9 +350,10 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         Log.i(TAG, "Service shutting down")
 
-        // Stop TCP server if it was ever started
+        // Stop TCP server and MCP HTTP server if they were started
         serviceScope.launch {
             if (::tcpServer.isInitialized) tcpServer.stop()
+            mcpHttpServer?.stop()
         }
 
         // Cancel all coroutines
@@ -407,6 +451,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     fun enable() {
         startForegroundService()
         startTcpServer()
+        startMcpHttpServer()
         requestMediaProjectionPermission()
     }
 
@@ -418,6 +463,8 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         stopForeground(true)
         serviceScope.launch {
             if (::tcpServer.isInitialized) tcpServer.stop()
+            mcpHttpServer?.stop()
+            mcpHttpServer = null
         }
     }
 
@@ -442,6 +489,16 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     fun getUptime(): Long {
         return if (startTime > 0) System.currentTimeMillis() - startTime else 0
     }
+
+    /**
+     * Get MCP HTTP server port (for MainActivity display)
+     */
+    fun getMcpHttpPort(): Int = mcpHttpServer?.getPort() ?: McpHttpServer.MCP_PORT
+
+    /**
+     * Check if MCP HTTP server is running (for MainActivity status display)
+     */
+    fun getMcpHttpActive(): Boolean = mcpHttpServer?.isRunning() ?: false
 
     /**
      * Check if MediaProjection permission is granted
@@ -507,6 +564,10 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
                 .setEventType(neuralbridge.Neuralbridge.EventType.TOAST_SHOWN)
                 .setToast(toastEvent)
                 .build()
+
+            // Add to static toast buffer for MCP HTTP handler (max 50 entries)
+            if (recentToasts.size >= 50) recentToasts.removeAt(0)
+            recentToasts.add(text to System.currentTimeMillis())
 
             // Launch on IO dispatcher to avoid NetworkOnMainThreadException
             serviceScope.launch(Dispatchers.IO) {

@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.serialization")
     id("com.google.protobuf")
 }
 
@@ -92,6 +93,16 @@ dependencies {
     // Protobuf
     implementation("com.google.protobuf:protobuf-kotlin:3.24.0")
     implementation("com.google.protobuf:protobuf-java:3.24.0")
+
+    // Ktor (CIO engine — pure Kotlin, no JNI, Kotlin 2.0 compatible)
+    val ktorVersion = "3.0.3"
+    implementation("io.ktor:ktor-server-cio:$ktorVersion")
+    implementation("io.ktor:ktor-server-core:$ktorVersion")
+    implementation("io.ktor:ktor-server-content-negotiation:$ktorVersion")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:$ktorVersion")
+
+    // kotlinx.serialization (1.7.x required for Kotlin 2.0.21)
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

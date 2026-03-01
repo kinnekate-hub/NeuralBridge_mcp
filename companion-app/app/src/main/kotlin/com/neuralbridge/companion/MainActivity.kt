@@ -33,6 +33,9 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.neuralbridge.companion.adapter.LogAdapter
 import com.neuralbridge.companion.log.CommandLog
+import com.neuralbridge.companion.mcp.McpAuthManager
+import com.neuralbridge.companion.mcp.McpHttpServer
+import com.neuralbridge.companion.mcp.McpNetworkUtils
 import com.neuralbridge.companion.service.NeuralBridgeAccessibilityService
 
 class MainActivity : Activity() {
@@ -269,7 +272,9 @@ class MainActivity : Activity() {
             connectionStatusIcon.text = "📡"
             connectionStatusText.text = "WAITING FOR CONNECTION"
             connectionStatusText.setTextColor(getColor(R.color.text_medium_emphasis))
-            connectionDetailText.text = "Port 38472"
+            val httpPort = NeuralBridgeAccessibilityService.instance?.getMcpHttpPort() ?: McpHttpServer.MCP_PORT
+            val wifiIp = McpNetworkUtils.getWifiIpAddress(this) ?: "device-ip"
+            connectionDetailText.text = "HTTP: http://$wifiIp:$httpPort/mcp\nTCP (legacy): Port 38472"
         }
 
         // 3-up status grid
@@ -278,8 +283,13 @@ class MainActivity : Activity() {
         accessibilityStatusTextView.text = if (accessibilityOn) "ACTIVE" else "OFF"
         accessibilityStatusTextView.setTextColor(getColor(if (accessibilityOn) R.color.success else R.color.status_error))
 
+        val httpActive = NeuralBridgeAccessibilityService.instance?.getMcpHttpActive() ?: false
         tcpStatusBar.setBackgroundColor(getColor(if (isRunning) R.color.status_active else R.color.status_inactive))
-        tcpStatusText.text = if (isRunning) "ACTIVE" else "OFF"
+        tcpStatusText.text = when {
+            !isRunning -> "OFF"
+            httpActive -> "HTTP+TCP"
+            else -> "TCP"
+        }
         tcpStatusText.setTextColor(getColor(if (isRunning) R.color.success else R.color.status_error))
 
         val screenshotReady = service?.hasMediaProjectionPermission() ?: false
@@ -295,6 +305,8 @@ class MainActivity : Activity() {
             append("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
             append("Screen: ${dm.widthPixels}x${dm.heightPixels} @ ${dm.densityDpi}dpi\n")
             append("Density: ${dm.density}x")
+            val wifiIp3 = McpNetworkUtils.getWifiIpAddress(this@MainActivity) ?: "no wifi"
+            append("\nMCP: http://$wifiIp3:${McpHttpServer.MCP_PORT}/mcp")
         }
         deviceInfoText.text = info
     }
@@ -342,12 +354,18 @@ class MainActivity : Activity() {
             startActivity(Intent(this, com.neuralbridge.companion.screenshot.ScreenshotConsentActivity::class.java))
         }
 
-        // Copy ADB commands button
-        findViewById<Button>(R.id.btnCopyAdbCommands).setOnClickListener {
+        // MCP HTTP config copy
+        val mcpAuthManager = McpAuthManager(this)
+        val apiKey = mcpAuthManager.getOrCreateApiKey()
+        val wifiIp2 = McpNetworkUtils.getWifiIpAddress(this) ?: "device-ip"
+        val httpPort2 = McpHttpServer.MCP_PORT
+        val copyBtn = findViewById<Button>(R.id.btnCopyAdbCommands)
+        copyBtn.text = "COPY MCP CONFIG"
+        copyBtn.setOnClickListener {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("ADB Commands",
-                "adb forward tcp:38472 tcp:38472\ncargo run --release -- --auto-discover"))
-            Toast.makeText(this, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+            val mcpConfig = """{"mcpServers":{"neuralbridge":{"type":"http","url":"http://$wifiIp2:$httpPort2/mcp","headers":{"${McpAuthManager.HEADER_NAME}":"$apiKey"}}}}"""
+            clipboard.setPrimaryClip(ClipData.newPlainText("MCP Config", mcpConfig))
+            Toast.makeText(this, "Copied! Paste into .claude/mcp.json", Toast.LENGTH_LONG).show()
         }
     }
 
