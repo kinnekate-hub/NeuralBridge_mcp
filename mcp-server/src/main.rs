@@ -7,23 +7,21 @@
 
 use anyhow::{Context, Result};
 use base64::Engine;
+use rmcp::model::ErrorCode;
 use rmcp::{
-    ErrorData as McpError,
-    ServerHandler,
-    ServiceExt,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
     tool, tool_handler, tool_router,
     transport::io::stdio,
+    ErrorData as McpError, ServerHandler, ServiceExt,
 };
-use rmcp::model::ErrorCode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 mod device;
@@ -33,7 +31,7 @@ mod tools;
 
 use device::manager::DeviceManager;
 use protocol::connection::DeviceConnection;
-use protocol::pb::{self, Request, request::Command};
+use protocol::pb::{self, request::Command, Request};
 
 // ============================================================================
 // Response Format Configuration
@@ -175,7 +173,6 @@ fn to_mcp_error(e: anyhow::Error) -> McpError {
     McpError::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None)
 }
 
-
 // Helper to validate selector has at least one non-empty field or boolean filter
 #[allow(clippy::too_many_arguments)]
 fn validate_selector(
@@ -203,7 +200,8 @@ fn validate_selector(
         || checkable.is_some()
         || checked.is_some();
 
-    if !has_text && !has_resource_id && !has_content_desc && !has_class_name && !has_boolean_filter {
+    if !has_text && !has_resource_id && !has_content_desc && !has_class_name && !has_boolean_filter
+    {
         return Err(McpError::new(
             ErrorCode::INVALID_PARAMS,
             "Selector must have at least one non-empty field (text, resource_id, content_desc, class_name) or boolean filter (clickable, scrollable, focusable, long_clickable, checkable, checked)".to_string(),
@@ -244,7 +242,10 @@ async fn retry_on_transient(
                 let is_retryable = response.error_code == pb::ErrorCode::ElementNotFound as i32;
 
                 if is_retryable && attempt < max_retries {
-                    debug!("Retryable error (code={}): {}", response.error_code, response.error_message);
+                    debug!(
+                        "Retryable error (code={}): {}",
+                        response.error_code, response.error_message
+                    );
                     last_error = Some(anyhow::anyhow!("{}", response.error_message));
                     continue;
                 }
@@ -304,10 +305,16 @@ impl AppState {
         let device_id_str = device_id.as_ref()
             .context("No device selected. Call android_list_devices to see available devices, then android_select_device to connect.")?;
 
-        debug!("Checking companion app permissions on device: {}", device_id_str);
+        debug!(
+            "Checking companion app permissions on device: {}",
+            device_id_str
+        );
 
         // Check current permissions
-        let status = self.device_manager.check_permissions(device_id_str).await
+        let status = self
+            .device_manager
+            .check_permissions(device_id_str)
+            .await
             .context("Failed to check companion app permissions")?;
 
         // If not ready and auto-enable is requested, try to enable
@@ -315,17 +322,24 @@ impl AppState {
             info!("Auto-enabling missing permissions...");
 
             if !status.accessibility_enabled {
-                self.device_manager.enable_accessibility_service(device_id_str).await
+                self.device_manager
+                    .enable_accessibility_service(device_id_str)
+                    .await
                     .context("Failed to enable AccessibilityService")?;
             }
 
             if !status.notification_listener_enabled {
-                self.device_manager.enable_notification_listener(device_id_str).await
+                self.device_manager
+                    .enable_notification_listener(device_id_str)
+                    .await
                     .context("Failed to enable NotificationListenerService")?;
             }
 
             // Re-check after enabling
-            let new_status = self.device_manager.check_permissions(device_id_str).await
+            let new_status = self
+                .device_manager
+                .check_permissions(device_id_str)
+                .await
                 .context("Failed to re-check permissions after auto-enable")?;
 
             if !new_status.is_ready() {
@@ -382,15 +396,19 @@ impl AppState {
 
         // Pre-flight check: verify companion app permissions
         let auto_enable = self.auto_enable_permissions.load(Ordering::SeqCst);
-        self.check_companion_ready(auto_enable).await
+        self.check_companion_ready(auto_enable)
+            .await
             .context("Companion app not ready")?;
 
         // Set up ADB port forwarding
-        self.device_manager.setup_port_forwarding(device_id_str).await
+        self.device_manager
+            .setup_port_forwarding(device_id_str)
+            .await
             .context("Failed to set up ADB port forwarding")?;
 
         // Establish TCP connection (with automatic retry logic)
-        let new_conn = DeviceConnection::connect().await
+        let new_conn = DeviceConnection::connect()
+            .await
             .context("Failed to connect to companion app")?;
 
         // Take the event receiver and spawn background task to process events
@@ -399,7 +417,10 @@ impl AppState {
             tokio::spawn(async move {
                 debug!("Event reader task started");
                 while let Some(event) = event_rx.recv().await {
-                    debug!("Received event: type={:?}, id={}", event.event_type, event.event_id);
+                    debug!(
+                        "Received event: type={:?}, id={}",
+                        event.event_type, event.event_id
+                    );
 
                     // Add to circular buffer (remove oldest if full)
                     let mut buffer = event_buffer.write().await;
@@ -817,16 +838,19 @@ fn compress_logcat(raw: &str, max_chars: usize) -> (String, usize) {
     let original_len = raw.len();
 
     // Strip timestamps: logcat lines look like "02-19 10:23:45.123  1234  5678 W TAG: msg"
-    let stripped: Vec<String> = raw.lines().map(|line| {
-        // Try to strip "MM-DD HH:MM:SS.mmm  PID  TID " prefix
-        let parts: Vec<&str> = line.splitn(6, ' ').collect();
-        if parts.len() >= 6 && parts[0].len() == 5 && parts[1].contains(':') {
-            // Skip date(0), time(1), pid(2), tid(3) - keep level(4) onwards
-            parts[4..].join(" ")
-        } else {
-            line.to_string()
-        }
-    }).collect();
+    let stripped: Vec<String> = raw
+        .lines()
+        .map(|line| {
+            // Try to strip "MM-DD HH:MM:SS.mmm  PID  TID " prefix
+            let parts: Vec<&str> = line.splitn(6, ' ').collect();
+            if parts.len() >= 6 && parts[0].len() == 5 && parts[1].contains(':') {
+                // Skip date(0), time(1), pid(2), tid(3) - keep level(4) onwards
+                parts[4..].join(" ")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
 
     // Deduplicate consecutive identical lines
     let mut deduped: Vec<String> = Vec::new();
@@ -850,7 +874,8 @@ fn compress_logcat(raw: &str, max_chars: usize) -> (String, usize) {
     let result = if joined.len() > max_chars {
         let start = joined.len() - max_chars;
         // Find next newline to avoid mid-line cut
-        let actual_start = joined[start..].find('\n')
+        let actual_start = joined[start..]
+            .find('\n')
             .map(|p| start + p + 1)
             .unwrap_or(start);
         format!("... (truncated)\n{}", &joined[actual_start..])
@@ -867,26 +892,94 @@ fn compress_logcat(raw: &str, max_chars: usize) -> (String, usize) {
 
 static TOOL_CATALOG: &[(&str, &str, &str)] = &[
     // OBSERVE
-    ("android_get_ui_tree", "Get UI tree of current screen with element IDs, text, bounds", "observe"),
-    ("android_screenshot", "Capture screenshot as MCP image content", "observe"),
-    ("android_find_elements", "Find elements by text/resource_id/content_desc/class", "observe"),
-    ("android_get_foreground_app", "Get current app package and activity name", "observe"),
-    ("android_get_screen_context", "Snapshot: app info + UI tree + thumbnail in one call", "observe"),
-    ("android_get_clipboard", "Get clipboard text content", "observe"),
-    ("android_get_notifications", "Get recent notification events", "observe"),
-    ("android_get_device_info", "Get device model, OS version, screen size", "observe"),
-    ("android_get_recent_toasts", "Get recent toast messages", "observe"),
+    (
+        "android_get_ui_tree",
+        "Get UI tree of current screen with element IDs, text, bounds",
+        "observe",
+    ),
+    (
+        "android_screenshot",
+        "Capture screenshot as MCP image content",
+        "observe",
+    ),
+    (
+        "android_find_elements",
+        "Find elements by text/resource_id/content_desc/class",
+        "observe",
+    ),
+    (
+        "android_get_foreground_app",
+        "Get current app package and activity name",
+        "observe",
+    ),
+    (
+        "android_get_screen_context",
+        "Snapshot: app info + UI tree + thumbnail in one call",
+        "observe",
+    ),
+    (
+        "android_get_clipboard",
+        "Get clipboard text content",
+        "observe",
+    ),
+    (
+        "android_get_notifications",
+        "Get recent notification events",
+        "observe",
+    ),
+    (
+        "android_get_device_info",
+        "Get device model, OS version, screen size",
+        "observe",
+    ),
+    (
+        "android_get_recent_toasts",
+        "Get recent toast messages",
+        "observe",
+    ),
     // ACT
-    ("android_tap", "Tap at coordinates or on element by selector", "act"),
-    ("android_long_press", "Long press at coordinates or on element", "act"),
-    ("android_swipe", "Swipe between coordinates (duration_ms < 200 = fling)", "act"),
-    ("android_input_text", "Type text into focused field or element by selector", "act"),
-    ("android_press_key", "Press hardware key (BACK, HOME, ENTER, etc.)", "act"),
-    ("android_global_action", "System action: back, home, recents, notifications", "act"),
-    ("android_double_tap", "Double tap at coordinates or on element", "act"),
+    (
+        "android_tap",
+        "Tap at coordinates or on element by selector",
+        "act",
+    ),
+    (
+        "android_long_press",
+        "Long press at coordinates or on element",
+        "act",
+    ),
+    (
+        "android_swipe",
+        "Swipe between coordinates (duration_ms < 200 = fling)",
+        "act",
+    ),
+    (
+        "android_input_text",
+        "Type text into focused field or element by selector",
+        "act",
+    ),
+    (
+        "android_press_key",
+        "Press hardware key (BACK, HOME, ENTER, etc.)",
+        "act",
+    ),
+    (
+        "android_global_action",
+        "System action: back, home, recents, notifications",
+        "act",
+    ),
+    (
+        "android_double_tap",
+        "Double tap at coordinates or on element",
+        "act",
+    ),
     ("android_pinch", "Pinch zoom (scale > 1.0 = zoom in)", "act"),
     ("android_drag", "Drag from one point to another", "act"),
-    ("android_fling", "Fling in direction (up/down/left/right)", "act"),
+    (
+        "android_fling",
+        "Fling in direction (up/down/left/right)",
+        "act",
+    ),
     ("android_set_clipboard", "Set clipboard text", "act"),
     ("android_pull_to_refresh", "Pull-to-refresh gesture", "act"),
     ("android_dismiss_keyboard", "Dismiss soft keyboard", "act"),
@@ -896,26 +989,90 @@ static TOOL_CATALOG: &[(&str, &str, &str)] = &[
     ("android_open_url", "Open URL in default browser", "manage"),
     ("android_list_apps", "List installed apps", "manage"),
     ("android_install_app", "Install APK on device", "manage"),
-    ("android_uninstall_app", "Uninstall app by package name", "manage"),
-    ("android_clear_app_data", "Clear app data and cache", "manage"),
-    ("android_grant_permission", "Grant runtime permission to app", "manage"),
-    ("android_revoke_permission", "Revoke runtime permission from app", "manage"),
+    (
+        "android_uninstall_app",
+        "Uninstall app by package name",
+        "manage",
+    ),
+    (
+        "android_clear_app_data",
+        "Clear app data and cache",
+        "manage",
+    ),
+    (
+        "android_grant_permission",
+        "Grant runtime permission to app",
+        "manage",
+    ),
+    (
+        "android_revoke_permission",
+        "Revoke runtime permission from app",
+        "manage",
+    ),
     // DEVICE
-    ("android_list_devices", "List connected devices with status", "device"),
-    ("android_select_device", "Select device for all subsequent commands", "device"),
+    (
+        "android_list_devices",
+        "List connected devices with status",
+        "device",
+    ),
+    (
+        "android_select_device",
+        "Select device for all subsequent commands",
+        "device",
+    ),
     // WAIT
-    ("android_wait_for_element", "Wait for element to appear on screen", "wait"),
-    ("android_wait_for_gone", "Wait for element to disappear", "wait"),
-    ("android_wait_for_idle", "Wait for UI to become idle", "wait"),
-    ("android_scroll_to_element", "Scroll to find off-screen element", "wait"),
+    (
+        "android_wait_for_element",
+        "Wait for element to appear on screen",
+        "wait",
+    ),
+    (
+        "android_wait_for_gone",
+        "Wait for element to disappear",
+        "wait",
+    ),
+    (
+        "android_wait_for_idle",
+        "Wait for UI to become idle",
+        "wait",
+    ),
+    (
+        "android_scroll_to_element",
+        "Scroll to find off-screen element",
+        "wait",
+    ),
     // TEST
-    ("android_capture_logcat", "Capture logcat for debugging", "test"),
-    ("android_screenshot_diff", "Compare screenshots for visual regression", "test"),
-    ("android_accessibility_audit", "Audit screen for accessibility issues", "test"),
-    ("android_enable_events", "Enable/disable event streaming", "test"),
+    (
+        "android_capture_logcat",
+        "Capture logcat for debugging",
+        "test",
+    ),
+    (
+        "android_screenshot_diff",
+        "Compare screenshots for visual regression",
+        "test",
+    ),
+    (
+        "android_accessibility_audit",
+        "Audit screen for accessibility issues",
+        "test",
+    ),
+    (
+        "android_enable_events",
+        "Enable/disable event streaming",
+        "test",
+    ),
     // META
-    ("android_search_tools", "Search for tools by keyword or category", "meta"),
-    ("android_describe_tools", "Get detailed descriptions of specific tools", "meta"),
+    (
+        "android_search_tools",
+        "Search for tools by keyword or category",
+        "meta",
+    ),
+    (
+        "android_describe_tools",
+        "Get detailed descriptions of specific tools",
+        "meta",
+    ),
 ];
 
 // ============================================================================
@@ -995,7 +1152,8 @@ impl NeuralBridgeServer {
 
         // Encode to JPEG
         let mut output = Vec::new();
-        resized.write_to(&mut Cursor::new(&mut output), image::ImageFormat::Jpeg)
+        resized
+            .write_to(&mut Cursor::new(&mut output), image::ImageFormat::Jpeg)
             .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
 
         Ok((output, new_width, new_height))
@@ -1008,10 +1166,16 @@ impl NeuralBridgeServer {
         if !e.resource_id.is_empty() {
             obj.insert("resource_id".into(), serde_json::json!(e.resource_id));
         }
-        if !e.class_name.is_empty() && !matches!(e.class_name.as_str(),
-            "android.view.View" | "android.view.ViewGroup" |
-            "android.widget.FrameLayout" | "android.widget.LinearLayout" |
-            "android.widget.RelativeLayout") {
+        if !e.class_name.is_empty()
+            && !matches!(
+                e.class_name.as_str(),
+                "android.view.View"
+                    | "android.view.ViewGroup"
+                    | "android.widget.FrameLayout"
+                    | "android.widget.LinearLayout"
+                    | "android.widget.RelativeLayout"
+            )
+        {
             obj.insert("class".into(), serde_json::json!(e.class_name));
         }
         if !e.text.is_empty() {
@@ -1022,18 +1186,34 @@ impl NeuralBridgeServer {
         }
         if let Some(b) = &e.bounds {
             if cfg.compact_bounds {
-                obj.insert("bounds".into(), serde_json::json!([b.left, b.top, b.right, b.bottom]));
+                obj.insert(
+                    "bounds".into(),
+                    serde_json::json!([b.left, b.top, b.right, b.bottom]),
+                );
             } else {
-                obj.insert("bounds".into(), serde_json::json!({
-                    "left": b.left, "top": b.top, "right": b.right, "bottom": b.bottom
-                }));
+                obj.insert(
+                    "bounds".into(),
+                    serde_json::json!({
+                        "left": b.left, "top": b.top, "right": b.right, "bottom": b.bottom
+                    }),
+                );
             }
         }
-        if e.clickable { obj.insert("clickable".into(), serde_json::json!(true)); }
-        if e.focusable { obj.insert("focusable".into(), serde_json::json!(true)); }
-        if e.checkable { obj.insert("checkable".into(), serde_json::json!(true)); }
-        if e.scrollable { obj.insert("scrollable".into(), serde_json::json!(true)); }
-        if !e.semantic_type.is_empty() && e.semantic_type != "0" { obj.insert("type".into(), serde_json::json!(e.semantic_type)); }
+        if e.clickable {
+            obj.insert("clickable".into(), serde_json::json!(true));
+        }
+        if e.focusable {
+            obj.insert("focusable".into(), serde_json::json!(true));
+        }
+        if e.checkable {
+            obj.insert("checkable".into(), serde_json::json!(true));
+        }
+        if e.scrollable {
+            obj.insert("scrollable".into(), serde_json::json!(true));
+        }
+        if !e.semantic_type.is_empty() && e.semantic_type != "0" {
+            obj.insert("type".into(), serde_json::json!(e.semantic_type));
+        }
         serde_json::Value::Object(obj)
     }
 
@@ -1052,8 +1232,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_get_ui_tree");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build request
         let request = Request {
@@ -1066,8 +1245,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -1080,44 +1258,57 @@ impl NeuralBridgeServer {
         // Extract UI tree result
         let ui_tree = match response.result {
             Some(pb::response::Result::UiTree(tree)) => tree,
-            _ => return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid response: expected UI tree".to_string()
-            )])),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid response: expected UI tree".to_string(),
+                )]))
+            }
         };
 
         // Apply element filtering
         let cfg = self.state.config();
-        let filter_mode = params.filter.as_deref().unwrap_or(
-            if cfg.filter_elements { "interactive" } else { "all" }
-        );
-        let elements_to_show: Vec<_> = ui_tree.elements.iter().filter(|e| match filter_mode {
-            "all" => true,
-            "text" => !e.text.is_empty() || !e.content_description.is_empty(),
-            _ => e.clickable || e.focusable || e.scrollable || e.checkable
-                 || !e.text.is_empty() || !e.content_description.is_empty(),
-        }).collect();
+        let filter_mode = params.filter.as_deref().unwrap_or(if cfg.filter_elements {
+            "interactive"
+        } else {
+            "all"
+        });
+        let elements_to_show: Vec<_> = ui_tree
+            .elements
+            .iter()
+            .filter(|e| match filter_mode {
+                "all" => true,
+                "text" => !e.text.is_empty() || !e.content_description.is_empty(),
+                _ => {
+                    e.clickable
+                        || e.focusable
+                        || e.scrollable
+                        || e.checkable
+                        || !e.text.is_empty()
+                        || !e.content_description.is_empty()
+                }
+            })
+            .collect();
 
         if cfg.compact_tree {
             // Compact tabular format
             let mut table = String::from("IDX | resource_id | text | desc | flags | bounds\n");
             let mut index_map = serde_json::Map::new();
             for (idx, e) in elements_to_show.iter().enumerate() {
-                let flags = format!("{}{}{}{}",
+                let flags = format!(
+                    "{}{}{}{}",
                     if e.clickable { "c" } else { "" },
                     if e.focusable { "f" } else { "" },
                     if e.scrollable { "s" } else { "" },
                     if e.checkable { "k" } else { "" },
                 );
-                let bounds_str = e.bounds.as_ref()
+                let bounds_str = e
+                    .bounds
+                    .as_ref()
                     .map(|b| format!("[{},{},{},{}]", b.left, b.top, b.right, b.bottom))
                     .unwrap_or_default();
-                table.push_str(&format!("{} | {} | {} | {} | {} | {}\n",
-                    idx,
-                    e.resource_id,
-                    e.text,
-                    e.content_description,
-                    flags,
-                    bounds_str,
+                table.push_str(&format!(
+                    "{} | {} | {} | {} | {} | {}\n",
+                    idx, e.resource_id, e.text, e.content_description, flags, bounds_str,
                 ));
                 index_map.insert(idx.to_string(), serde_json::json!(e.element_id));
             }
@@ -1132,7 +1323,9 @@ impl NeuralBridgeServer {
                 "index_map": serde_json::Value::Object(index_map),
                 "latency_ms": response.latency_ms,
             });
-            Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+            Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )]))
         } else {
             // Verbose JSON format
             let result = serde_json::json!({
@@ -1145,7 +1338,9 @@ impl NeuralBridgeServer {
                 "filter": filter_mode,
                 "latency_ms": response.latency_ms,
             });
-            Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+            Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )]))
         }
     }
 
@@ -1160,8 +1355,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_screenshot");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Parse quality parameter
         let quality = match params.quality.as_deref() {
@@ -1179,8 +1373,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success - if MediaProjection fails, fall back to ADB
         if !response.success {
@@ -1190,24 +1383,25 @@ impl NeuralBridgeServer {
 
                 // Get device ID
                 let device_id = self.state.device_id.read().await;
-                let device_id_str = device_id.as_ref()
+                let device_id_str = device_id
+                    .as_ref()
                     .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected")))?;
 
                 // Execute ADB screencap
                 let adb = self.state.device_manager().adb();
-                let screenshot_data = adb.screenshot(device_id_str).await
+                let screenshot_data = adb
+                    .screenshot(device_id_str)
+                    .await
                     .map_err(|e| to_mcp_error(anyhow::anyhow!("ADB screencap failed: {}", e)))?;
 
                 // Downscale if needed (max_width=0 means no downscaling, returns original dimensions)
                 let max_width = params.max_width.unwrap_or(720);
-                let (final_data, width, height) = Self::downscale_image(&screenshot_data, max_width)
-                    .map_err(to_mcp_error)?;
+                let (final_data, width, height) =
+                    Self::downscale_image(&screenshot_data, max_width).map_err(to_mcp_error)?;
 
                 // Encode as base64
-                let base64_image = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &final_data
-                );
+                let base64_image =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &final_data);
 
                 // Return as image content + metadata
                 let metadata = serde_json::json!({
@@ -1232,21 +1426,21 @@ impl NeuralBridgeServer {
         // Extract screenshot result
         let screenshot = match response.result {
             Some(pb::response::Result::ScreenshotResult(screenshot)) => screenshot,
-            _ => return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid response: expected screenshot result".to_string()
-            )])),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid response: expected screenshot result".to_string(),
+                )]))
+            }
         };
 
         // Downscale if needed (always call to ensure JPEG format)
         let max_width = params.max_width.unwrap_or(720);
-        let (final_data, final_width, final_height) = Self::downscale_image(&screenshot.image_data, max_width)
-            .map_err(to_mcp_error)?;
+        let (final_data, final_width, final_height) =
+            Self::downscale_image(&screenshot.image_data, max_width).map_err(to_mcp_error)?;
 
         // Encode image data as base64
-        let base64_image = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &final_data
-        );
+        let base64_image =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &final_data);
 
         // Return as image content + metadata
         let metadata = serde_json::json!({
@@ -1275,8 +1469,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_find_elements");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Validate selector has at least one non-empty field or boolean filter
         validate_selector(
@@ -1322,8 +1515,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -1347,9 +1539,11 @@ impl NeuralBridgeServer {
         // Extract element list result
         let element_list = match response.result {
             Some(pb::response::Result::ElementList(list)) => list,
-            _ => return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid response: expected element list".to_string()
-            )])),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid response: expected element list".to_string(),
+                )]))
+            }
         };
 
         // Convert to JSON
@@ -1362,7 +1556,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -1373,8 +1569,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_get_foreground_app");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build request
         let request = Request {
@@ -1383,8 +1578,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -1397,9 +1591,11 @@ impl NeuralBridgeServer {
         // Extract app info result
         let app_info = match response.result {
             Some(pb::response::Result::AppInfo(info)) => info,
-            _ => return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid response: expected app info".to_string()
-            )])),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid response: expected app info".to_string(),
+                )]))
+            }
         };
 
         // Convert to JSON
@@ -1411,7 +1607,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -1423,16 +1621,21 @@ impl NeuralBridgeServer {
 
         // Get device ID
         let device_id = self.state.device_id.read().await;
-        let device_id_str = device_id.as_ref()
+        let device_id_str = device_id
+            .as_ref()
             .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected")))?;
 
         // Get device info via ADB
         let adb = self.state.device_manager().adb();
-        let device_info = adb.get_device_info(device_id_str).await
+        let device_info = adb
+            .get_device_info(device_id_str)
+            .await
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to get device info: {}", e)))?;
 
         // Return the device info JSON
-        Ok(CallToolResult::success(vec![Content::text(device_info.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            device_info.to_string(),
+        )]))
     }
 
     #[tool(
@@ -1448,8 +1651,7 @@ impl NeuralBridgeServer {
         let include_all = params.include_all_elements.unwrap_or(false);
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Step 1: Get UI tree (visible elements only).
         // UITree already carries the foreground_app package name, so we skip a
@@ -1463,14 +1665,16 @@ impl NeuralBridgeServer {
             })),
         };
 
-        let tree_response = conn.send_request(tree_request).await
+        let tree_response = conn
+            .send_request(tree_request)
+            .await
             .map_err(to_mcp_error)?;
 
         let ui_tree = match tree_response.result {
             Some(pb::response::Result::UiTree(tree)) => tree,
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "Failed to get UI tree".to_string()
+                    "Failed to get UI tree".to_string(),
                 )]));
             }
         };
@@ -1484,21 +1688,25 @@ impl NeuralBridgeServer {
             })),
         };
 
-        let screenshot_response = conn.send_request(screenshot_request).await
+        let screenshot_response = conn
+            .send_request(screenshot_request)
+            .await
             .map_err(to_mcp_error)?;
 
         let screenshot_result = match screenshot_response.result {
             Some(pb::response::Result::ScreenshotResult(result)) => result,
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "Failed to get screenshot".to_string()
+                    "Failed to get screenshot".to_string(),
                 )]));
             }
         };
 
         // Step 4: Filter elements to interactive/text elements (unless include_all is true)
         let cfg = self.state.config();
-        let filtered_elements: Vec<_> = ui_tree.elements.iter()
+        let filtered_elements: Vec<_> = ui_tree
+            .elements
+            .iter()
             .filter(|e| {
                 if include_all {
                     true
@@ -1510,6 +1718,8 @@ impl NeuralBridgeServer {
                 let mut elem = Self::format_element(e, cfg);
                 // Add center coordinates for screen context
                 if let Some(b) = &e.bounds {
+                    // SAFETY: format_element always returns Value::Object — unwrap() is an invariant,
+                    // not a runtime risk. A panic here would indicate a programming error, not user input.
                     let obj = elem.as_object_mut().unwrap();
                     obj.insert("center_x".into(), serde_json::json!((b.left + b.right) / 2));
                     obj.insert("center_y".into(), serde_json::json!((b.top + b.bottom) / 2));
@@ -1520,8 +1730,8 @@ impl NeuralBridgeServer {
 
         // Step 5: Downscale screenshot to 540px (optimal for screen context)
         // Always call downscale_image to ensure JPEG format
-        let (final_data, final_width, final_height) = Self::downscale_image(&screenshot_result.image_data, 540)
-            .map_err(to_mcp_error)?;
+        let (final_data, final_width, final_height) =
+            Self::downscale_image(&screenshot_result.image_data, 540).map_err(to_mcp_error)?;
 
         // Encode screenshot as base64
         let base64_screenshot = base64::engine::general_purpose::STANDARD.encode(&final_data);
@@ -1566,8 +1776,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_tap");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Check if using coordinates (no retry) or selector (with retry)
         let use_selector = params.x.is_none() || params.y.is_none();
@@ -1582,7 +1791,12 @@ impl NeuralBridgeServer {
                 params.resource_id.as_ref(),
                 params.content_desc.as_ref(),
                 None, // class_name not exposed in tap params
-                None, None, None, None, None, None, // no boolean filters in tap
+                None,
+                None,
+                None,
+                None,
+                None,
+                None, // no boolean filters in tap
             )?;
 
             // Build selector from params
@@ -1616,7 +1830,8 @@ impl NeuralBridgeServer {
             retry_on_transient(&conn, request, 1).await
         } else {
             conn.send_request(request).await
-        }.map_err(to_mcp_error)?;
+        }
+        .map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -1648,7 +1863,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -1662,12 +1879,14 @@ impl NeuralBridgeServer {
         info!("Tool: android_long_press");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build target (coordinates or selector)
         let target = if let (Some(x), Some(y)) = (params.x, params.y) {
-            Some(pb::long_press_request::Target::Coordinates(pb::Point { x, y }))
+            Some(pb::long_press_request::Target::Coordinates(pb::Point {
+                x,
+                y,
+            }))
         } else {
             // Validate selector has at least one non-empty field
             validate_selector(
@@ -1675,7 +1894,12 @@ impl NeuralBridgeServer {
                 params.resource_id.as_ref(),
                 None, // content_desc not in params
                 None, // class_name not in params
-                None, None, None, None, None, None, // no boolean filters in long_press
+                None,
+                None,
+                None,
+                None,
+                None,
+                None, // no boolean filters in long_press
             )?;
 
             // Build selector from params
@@ -1708,8 +1932,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -1725,7 +1948,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -1739,8 +1964,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_swipe");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build request
         let request = Request {
@@ -1759,8 +1983,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -1776,7 +1999,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -1790,12 +2015,14 @@ impl NeuralBridgeServer {
         info!("Tool: android_double_tap");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build target (coordinates or selector)
         let target = if let (Some(x), Some(y)) = (params.x, params.y) {
-            Some(pb::double_tap_request::Target::Coordinates(pb::Point { x, y }))
+            Some(pb::double_tap_request::Target::Coordinates(pb::Point {
+                x,
+                y,
+            }))
         } else {
             // Validate selector has at least one non-empty field
             validate_selector(
@@ -1803,7 +2030,12 @@ impl NeuralBridgeServer {
                 params.resource_id.as_ref(),
                 params.content_desc.as_ref(),
                 None,
-                None, None, None, None, None, None, // no boolean filters in double_tap
+                None,
+                None,
+                None,
+                None,
+                None,
+                None, // no boolean filters in double_tap
             )?;
 
             // Build selector from params
@@ -1833,8 +2065,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -1850,7 +2081,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -1864,8 +2097,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_pinch(scale={})", params.scale);
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build request
         let request = Request {
@@ -1881,8 +2113,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -1898,7 +2129,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -1912,8 +2145,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_drag");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build request
         let request = Request {
@@ -1932,8 +2164,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -1949,7 +2180,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -1963,8 +2196,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_fling({})", params.direction);
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Map direction string to enum
         let direction = match params.direction.to_lowercase().as_str() {
@@ -1987,8 +2219,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -2004,7 +2235,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2018,8 +2251,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_input_text ({} chars)", params.text.len());
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build target selector (if provided)
         let target = if params.element_text.is_some() || params.resource_id.is_some() {
@@ -2029,7 +2261,12 @@ impl NeuralBridgeServer {
                 params.resource_id.as_ref(),
                 None,
                 None,
-                None, None, None, None, None, None, // no boolean filters in input_text
+                None,
+                None,
+                None,
+                None,
+                None,
+                None, // no boolean filters in input_text
             )?;
 
             Some(pb::input_text_request::Target::Selector(pb::Selector {
@@ -2064,7 +2301,8 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response (with retry on transient failures)
-        let response = retry_on_transient(&conn, request, 1).await
+        let response = retry_on_transient(&conn, request, 1)
+            .await
             .map_err(to_mcp_error)?;
 
         // Check success
@@ -2081,7 +2319,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2095,8 +2335,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_press_key({})", params.key);
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Map key string to KeyCode enum
         let key_code = match params.key.to_lowercase().as_str() {
@@ -2131,7 +2370,8 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response (with retry on transient failures)
-        let response = retry_on_transient(&conn, request, 1).await
+        let response = retry_on_transient(&conn, request, 1)
+            .await
             .map_err(to_mcp_error)?;
 
         // Check success
@@ -2149,7 +2389,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2163,8 +2405,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_global_action({})", params.action);
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Map action string to GlobalAction enum
         let action = match params.action.to_lowercase().as_str() {
@@ -2190,8 +2431,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -2208,7 +2448,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -2226,14 +2468,15 @@ impl NeuralBridgeServer {
         info!("Tool: android_launch_app({})", params.package_name);
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build target (package name or activity)
         let target = if let Some(activity) = params.activity {
             Some(pb::launch_app_request::Target::Activity(activity))
         } else {
-            Some(pb::launch_app_request::Target::PackageName(params.package_name.clone()))
+            Some(pb::launch_app_request::Target::PackageName(
+                params.package_name.clone(),
+            ))
         };
 
         // Build request
@@ -2246,8 +2489,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -2275,7 +2517,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2294,26 +2538,29 @@ impl NeuralBridgeServer {
         if force {
             // Get device ID
             let device_id = self.state.device_id.read().await;
-            let device_id_str = device_id.as_ref()
+            let device_id_str = device_id
+                .as_ref()
                 .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected")))?;
 
             // Execute ADB force-stop
             let adb = self.state.device_manager().adb();
-            adb.force_stop(device_id_str, &params.package_name).await
+            adb.force_stop(device_id_str, &params.package_name)
+                .await
                 .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to force-stop app: {}", e)))?;
 
             // Return success result
             let result = serde_json::json!({
-    
+
                 "package_name": params.package_name,
                 "method": "adb_force_stop",
             });
 
-            Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+            Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )]))
         } else {
             // Try graceful close via companion app (FAST PATH)
-            let conn = self.state.get_connection().await
-                .map_err(to_mcp_error)?;
+            let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
             let request = Request {
                 request_id: Uuid::new_v4().to_string(),
@@ -2323,8 +2570,7 @@ impl NeuralBridgeServer {
                 })),
             };
 
-            let response = conn.send_request(request).await
-                .map_err(to_mcp_error)?;
+            let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
             if !response.success {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2334,13 +2580,15 @@ impl NeuralBridgeServer {
             }
 
             let result = serde_json::json!({
-    
+
                 "package_name": params.package_name,
                 "method": "graceful",
                 "latency_ms": response.latency_ms,
             });
 
-            Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+            Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )]))
         }
     }
 
@@ -2356,12 +2604,14 @@ impl NeuralBridgeServer {
 
         // Get device ID
         let device_id = self.state.device_id.read().await;
-        let device_id_str = device_id.as_ref()
+        let device_id_str = device_id
+            .as_ref()
             .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected")))?;
 
         // Execute ADB clear_app_data (SLOW PATH)
         let adb = self.state.device_manager().adb();
-        adb.clear_app_data(device_id_str, &params.package_name).await
+        adb.clear_app_data(device_id_str, &params.package_name)
+            .await
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to clear app data: {}", e)))?;
 
         // Return success result
@@ -2371,7 +2621,9 @@ impl NeuralBridgeServer {
             "message": "App data cleared successfully",
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2395,12 +2647,17 @@ impl NeuralBridgeServer {
 
         // Get device ID
         let device_id = self.state.device_id.read().await;
-        let device_id_str = device_id.as_ref()
-            .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected. Call android_list_devices first.")))?;
+        let device_id_str = device_id.as_ref().ok_or_else(|| {
+            to_mcp_error(anyhow::anyhow!(
+                "No device selected. Call android_list_devices first."
+            ))
+        })?;
 
         // Execute ADB pm list packages (SLOW PATH)
         let adb = self.state.device_manager().adb();
-        let packages = adb.list_packages(device_id_str, filter).await
+        let packages = adb
+            .list_packages(device_id_str, filter)
+            .await
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to list packages: {}", e)))?;
 
         let result = serde_json::json!({
@@ -2409,7 +2666,9 @@ impl NeuralBridgeServer {
             "filter": filter,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2421,16 +2680,23 @@ impl NeuralBridgeServer {
         Parameters(params): Parameters<InstallAppParams>,
     ) -> Result<CallToolResult, McpError> {
         let replace = params.replace.unwrap_or(true);
-        info!("Tool: android_install_app({}, replace={})", params.apk_path, replace);
+        info!(
+            "Tool: android_install_app({}, replace={})",
+            params.apk_path, replace
+        );
 
         // Get device ID
         let device_id = self.state.device_id.read().await;
-        let device_id_str = device_id.as_ref()
-            .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected. Call android_list_devices first.")))?;
+        let device_id_str = device_id.as_ref().ok_or_else(|| {
+            to_mcp_error(anyhow::anyhow!(
+                "No device selected. Call android_list_devices first."
+            ))
+        })?;
 
         // Execute ADB install (SLOW PATH)
         let adb = self.state.device_manager().adb();
-        adb.install_apk(device_id_str, &params.apk_path, replace).await
+        adb.install_apk(device_id_str, &params.apk_path, replace)
+            .await
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to install APK: {}", e)))?;
 
         let result = serde_json::json!({
@@ -2440,7 +2706,9 @@ impl NeuralBridgeServer {
             "message": "APK installed successfully",
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2452,16 +2720,23 @@ impl NeuralBridgeServer {
         Parameters(params): Parameters<UninstallAppParams>,
     ) -> Result<CallToolResult, McpError> {
         let keep_data = params.keep_data.unwrap_or(false);
-        info!("Tool: android_uninstall_app({}, keep_data={})", params.package_name, keep_data);
+        info!(
+            "Tool: android_uninstall_app({}, keep_data={})",
+            params.package_name, keep_data
+        );
 
         // Get device ID
         let device_id = self.state.device_id.read().await;
-        let device_id_str = device_id.as_ref()
-            .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected. Call android_list_devices first.")))?;
+        let device_id_str = device_id.as_ref().ok_or_else(|| {
+            to_mcp_error(anyhow::anyhow!(
+                "No device selected. Call android_list_devices first."
+            ))
+        })?;
 
         // Execute ADB uninstall (SLOW PATH)
         let adb = self.state.device_manager().adb();
-        adb.uninstall_package(device_id_str, &params.package_name, keep_data).await
+        adb.uninstall_package(device_id_str, &params.package_name, keep_data)
+            .await
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to uninstall app: {}", e)))?;
 
         let result = serde_json::json!({
@@ -2471,7 +2746,9 @@ impl NeuralBridgeServer {
             "message": "App uninstalled successfully",
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2482,16 +2759,23 @@ impl NeuralBridgeServer {
         &self,
         Parameters(params): Parameters<GrantPermissionParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!("Tool: android_grant_permission({}, {})", params.package_name, params.permission);
+        info!(
+            "Tool: android_grant_permission({}, {})",
+            params.package_name, params.permission
+        );
 
         // Get device ID
         let device_id = self.state.device_id.read().await;
-        let device_id_str = device_id.as_ref()
-            .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected. Call android_list_devices first.")))?;
+        let device_id_str = device_id.as_ref().ok_or_else(|| {
+            to_mcp_error(anyhow::anyhow!(
+                "No device selected. Call android_list_devices first."
+            ))
+        })?;
 
         // Execute ADB grant (SLOW PATH)
         let adb = self.state.device_manager().adb();
-        adb.grant_permission(device_id_str, &params.package_name, &params.permission).await
+        adb.grant_permission(device_id_str, &params.package_name, &params.permission)
+            .await
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to grant permission: {}", e)))?;
 
         let result = serde_json::json!({
@@ -2501,7 +2785,9 @@ impl NeuralBridgeServer {
             "message": "Permission granted successfully",
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2512,16 +2798,23 @@ impl NeuralBridgeServer {
         &self,
         Parameters(params): Parameters<RevokePermissionParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!("Tool: android_revoke_permission({}, {})", params.package_name, params.permission);
+        info!(
+            "Tool: android_revoke_permission({}, {})",
+            params.package_name, params.permission
+        );
 
         // Get device ID
         let device_id = self.state.device_id.read().await;
-        let device_id_str = device_id.as_ref()
-            .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected. Call android_list_devices first.")))?;
+        let device_id_str = device_id.as_ref().ok_or_else(|| {
+            to_mcp_error(anyhow::anyhow!(
+                "No device selected. Call android_list_devices first."
+            ))
+        })?;
 
         // Execute ADB revoke (SLOW PATH)
         let adb = self.state.device_manager().adb();
-        adb.revoke_permission(device_id_str, &params.package_name, &params.permission).await
+        adb.revoke_permission(device_id_str, &params.package_name, &params.permission)
+            .await
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to revoke permission: {}", e)))?;
 
         let result = serde_json::json!({
@@ -2531,7 +2824,9 @@ impl NeuralBridgeServer {
             "message": "Permission revoked successfully",
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2545,8 +2840,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_open_url({})", params.url);
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build request
         let request = Request {
@@ -2558,8 +2852,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -2576,7 +2869,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -2594,8 +2889,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_wait_for_element");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build selector from params
         let selector = pb::Selector {
@@ -2627,21 +2921,22 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
             // Timeout is not an error, just return found=false
             if response.error_code == pb::ErrorCode::Timeout as i32 {
                 let result = serde_json::json!({
-        
+
                     "found": false,
                     "elapsed_ms": response.latency_ms,
                     "reason": "timeout",
                     "suggestion": "Element did not appear within timeout. Try android_screenshot and android_get_ui_tree to verify current UI state, or check if app is loading/stuck."
                 });
-                return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                return Ok(CallToolResult::success(vec![Content::text(
+                    result.to_string(),
+                )]));
             }
 
             return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2657,7 +2952,9 @@ impl NeuralBridgeServer {
             "elapsed_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2671,8 +2968,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_wait_for_gone");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build selector from params
         let selector = pb::Selector {
@@ -2704,21 +3000,22 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
             // Timeout means element is still visible
             if response.error_code == pb::ErrorCode::Timeout as i32 {
                 let result = serde_json::json!({
-        
+
                     "found": true,
                     "elapsed_ms": response.latency_ms,
                     "reason": "timeout",
                     "message": "Element is still visible after timeout",
                 });
-                return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                return Ok(CallToolResult::success(vec![Content::text(
+                    result.to_string(),
+                )]));
             }
 
             return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2735,7 +3032,9 @@ impl NeuralBridgeServer {
             "message": "Element disappeared successfully",
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2749,8 +3048,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_wait_for_idle");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build request
         let request = Request {
@@ -2761,20 +3059,21 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
             // Timeout is not an error, just return idle=false
             if response.error_code == pb::ErrorCode::Timeout as i32 {
                 let result = serde_json::json!({
-        
+
                     "idle": false,
                     "elapsed_ms": response.latency_ms,
                     "reason": "timeout"
                 });
-                return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                return Ok(CallToolResult::success(vec![Content::text(
+                    result.to_string(),
+                )]));
             }
 
             return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -2790,7 +3089,9 @@ impl NeuralBridgeServer {
             "elapsed_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -2809,8 +3110,7 @@ impl NeuralBridgeServer {
         let direction = params.direction.unwrap_or_else(|| "up".to_string());
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build selector from params
         let selector = pb::Selector {
@@ -2841,7 +3141,9 @@ impl NeuralBridgeServer {
             })),
         };
 
-        let response = conn.send_request(find_request).await
+        let response = conn
+            .send_request(find_request)
+            .await
             .map_err(to_mcp_error)?;
 
         if response.success {
@@ -2865,7 +3167,9 @@ impl NeuralBridgeServer {
                             "bounds": bounds_val,
                         },
                     });
-                    return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        result.to_string(),
+                    )]));
                 }
             }
         }
@@ -2897,7 +3201,9 @@ impl NeuralBridgeServer {
                     "reason": "timeout",
                     "message": "Element not found within timeout",
                 });
-                return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                return Ok(CallToolResult::success(vec![Content::text(
+                    result.to_string(),
+                )]));
             }
 
             // Step 3a: Fling
@@ -2908,7 +3214,8 @@ impl NeuralBridgeServer {
                 })),
             };
 
-            conn.send_request(fling_request).await
+            conn.send_request(fling_request)
+                .await
                 .map_err(to_mcp_error)?;
 
             scroll_count += 1;
@@ -2921,7 +3228,8 @@ impl NeuralBridgeServer {
                 })),
             };
 
-            conn.send_request(idle_request).await
+            conn.send_request(idle_request)
+                .await
                 .map_err(to_mcp_error)?;
 
             // Step 3c: Find element again
@@ -2934,7 +3242,9 @@ impl NeuralBridgeServer {
                 })),
             };
 
-            let response = conn.send_request(find_request).await
+            let response = conn
+                .send_request(find_request)
+                .await
                 .map_err(to_mcp_error)?;
 
             if response.success {
@@ -2958,7 +3268,9 @@ impl NeuralBridgeServer {
                                 "bounds": bounds_val,
                             },
                         });
-                        return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            result.to_string(),
+                        )]));
                     }
                 }
             }
@@ -2973,7 +3285,9 @@ impl NeuralBridgeServer {
                 })),
             };
 
-            let response = conn.send_request(tree_request).await
+            let response = conn
+                .send_request(tree_request)
+                .await
                 .map_err(to_mcp_error)?;
 
             if response.success {
@@ -2981,7 +3295,9 @@ impl NeuralBridgeServer {
                     // Collect sorted visible element IDs for deterministic change detection.
                     // DefaultHasher is explicitly not stable across builds, so we use a
                     // sorted Vec comparison instead.
-                    let mut current_ids: Vec<String> = ui_tree.elements.iter()
+                    let mut current_ids: Vec<String> = ui_tree
+                        .elements
+                        .iter()
                         .filter(|e| e.visible)
                         .map(|e| e.element_id.clone())
                         .collect();
@@ -2999,7 +3315,9 @@ impl NeuralBridgeServer {
                                 "reason": "end_of_scroll",
                                 "message": "Reached end of scrollable content without finding element",
                             });
-                            return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+                            return Ok(CallToolResult::success(vec![Content::text(
+                                result.to_string(),
+                            )]));
                         }
                     }
 
@@ -3018,7 +3336,9 @@ impl NeuralBridgeServer {
             "message": format!("Element not found after {} scrolls", max_scrolls),
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -3036,19 +3356,21 @@ impl NeuralBridgeServer {
         info!("Tool: android_enable_events(enable={})", params.enable);
 
         // Convert event type strings to i32 enum values
-        let event_types = params.event_types.unwrap_or_default().iter().filter_map(|s| {
-            match s.to_lowercase().as_str() {
+        let event_types = params
+            .event_types
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|s| match s.to_lowercase().as_str() {
                 "ui_change" => Some(1),
                 "notification_posted" => Some(2),
                 "toast_shown" => Some(3),
                 "app_crash" => Some(4),
                 _ => None,
-            }
-        }).collect::<Vec<i32>>();
+            })
+            .collect::<Vec<i32>>();
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build request
         let request = Request {
@@ -3060,8 +3382,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -3078,7 +3399,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -3092,8 +3415,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_get_notifications");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build request
         let request = Request {
@@ -3104,8 +3426,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -3118,9 +3439,11 @@ impl NeuralBridgeServer {
         // Extract notification list result
         let notification_list = match response.result {
             Some(pb::response::Result::NotificationList(list)) => list,
-            _ => return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid response: expected notification list".to_string()
-            )])),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid response: expected notification list".to_string(),
+                )]))
+            }
         };
 
         // Convert to JSON
@@ -3140,7 +3463,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -3156,12 +3481,15 @@ impl NeuralBridgeServer {
 
         // Get device ID
         let device_id = self.state.device_id.read().await;
-        let device_id_str = device_id.as_ref()
+        let device_id_str = device_id
+            .as_ref()
             .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected")))?;
 
         // Execute ADB command to get clipboard
         let adb = self.state.device_manager().adb();
-        let clipboard_text = adb.get_clipboard(device_id_str).await
+        let clipboard_text = adb
+            .get_clipboard(device_id_str)
+            .await
             .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to get clipboard: {}", e)))?;
 
         // Return result
@@ -3172,7 +3500,9 @@ impl NeuralBridgeServer {
             "method": "adb",
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -3186,8 +3516,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_set_clipboard ({} chars)", params.text.len());
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Build request
         let request = Request {
@@ -3198,8 +3527,7 @@ impl NeuralBridgeServer {
         };
 
         // Send and await response
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         // Check success
         if !response.success {
@@ -3216,7 +3544,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -3235,7 +3565,8 @@ impl NeuralBridgeServer {
 
         // Get device ID
         let device_id = self.state.device_id.read().await;
-        let device_id_str = device_id.as_ref()
+        let device_id_str = device_id
+            .as_ref()
             .ok_or_else(|| to_mcp_error(anyhow::anyhow!("No device selected")))?;
 
         // Execute ADB command to capture logcat
@@ -3244,14 +3575,16 @@ impl NeuralBridgeServer {
         let lines = params.lines.unwrap_or(100);
         let crash_only = params.crash_only.unwrap_or(false);
 
-        let log_output = adb.capture_logcat(
-            device_id_str,
-            params.package.as_deref(),
-            level,
-            lines,
-            crash_only,
-        ).await
-        .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to capture logcat: {}", e)))?;
+        let log_output = adb
+            .capture_logcat(
+                device_id_str,
+                params.package.as_deref(),
+                level,
+                lines,
+                crash_only,
+            )
+            .await
+            .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to capture logcat: {}", e)))?;
 
         // Compress logcat output
         let (compressed_log, original_chars) = compress_logcat(&log_output, 8000);
@@ -3268,7 +3601,9 @@ impl NeuralBridgeServer {
             "crash_only": crash_only,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -3282,8 +3617,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_screenshot_diff");
 
         // Take a new screenshot
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         let request = Request {
             request_id: Uuid::new_v4().to_string(),
@@ -3293,8 +3627,7 @@ impl NeuralBridgeServer {
             })),
         };
 
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         if !response.success {
             return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -3306,15 +3639,19 @@ impl NeuralBridgeServer {
         // Extract screenshot result
         let screenshot_result = match response.result {
             Some(pb::response::Result::ScreenshotResult(result)) => result,
-            _ => return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid response: expected screenshot result".to_string()
-            )])),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid response: expected screenshot result".to_string(),
+                )]))
+            }
         };
 
         // Decode both images
         let reference_bytes = base64::engine::general_purpose::STANDARD
             .decode(&params.reference_base64)
-            .map_err(|e| to_mcp_error(anyhow::anyhow!("Failed to decode reference image: {}", e)))?;
+            .map_err(|e| {
+                to_mcp_error(anyhow::anyhow!("Failed to decode reference image: {}", e))
+            })?;
 
         let current_bytes = &screenshot_result.image_data;
 
@@ -3329,7 +3666,7 @@ impl NeuralBridgeServer {
         // Check dimensions match
         if reference_img.dimensions() != current_img.dimensions() {
             let result = serde_json::json!({
-    
+
                 "match": false,
                 "similarity": 0.0,
                 "reference_dimensions": {
@@ -3342,7 +3679,9 @@ impl NeuralBridgeServer {
                 },
                 "reason": "Dimensions mismatch",
             });
-            return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+            return Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )]));
         }
 
         // Compare pixels
@@ -3375,7 +3714,9 @@ impl NeuralBridgeServer {
             "matching_pixels": matching_pixels,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -3403,14 +3744,12 @@ impl NeuralBridgeServer {
                 event.event_type == pb::EventType::ToastShown as i32
                     && event.timestamp >= cutoff_time
             })
-            .filter_map(|event| {
-                match &event.data {
-                    Some(pb::event::Data::Toast(toast)) => Some(serde_json::json!({
-                        "text": toast.text,
-                        "timestamp": event.timestamp,
-                    })),
-                    _ => None,
-                }
+            .filter_map(|event| match &event.data {
+                Some(pb::event::Data::Toast(toast)) => Some(serde_json::json!({
+                    "text": toast.text,
+                    "timestamp": event.timestamp,
+                })),
+                _ => None,
             })
             .collect();
 
@@ -3421,7 +3760,9 @@ impl NeuralBridgeServer {
             "since_ms": since_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -3432,8 +3773,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_pull_to_refresh");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Perform swipe down from (540, 400) to (540, 1400) over 500ms
         let swipe_request = Request {
@@ -3445,7 +3785,9 @@ impl NeuralBridgeServer {
             })),
         };
 
-        let response = conn.send_request(swipe_request).await
+        let response = conn
+            .send_request(swipe_request)
+            .await
             .map_err(to_mcp_error)?;
 
         if !response.success {
@@ -3463,7 +3805,8 @@ impl NeuralBridgeServer {
             })),
         };
 
-        conn.send_request(wait_request).await
+        conn.send_request(wait_request)
+            .await
             .map_err(to_mcp_error)?;
 
         let result = serde_json::json!({
@@ -3471,7 +3814,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -3482,8 +3827,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_dismiss_keyboard");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Send global back action
         let request = Request {
@@ -3493,8 +3837,7 @@ impl NeuralBridgeServer {
             })),
         };
 
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         if !response.success {
             return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -3508,7 +3851,9 @@ impl NeuralBridgeServer {
             "latency_ms": response.latency_ms,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -3519,8 +3864,7 @@ impl NeuralBridgeServer {
         info!("Tool: android_accessibility_audit");
 
         // Get connection
-        let conn = self.state.get_connection().await
-            .map_err(to_mcp_error)?;
+        let conn = self.state.get_connection().await.map_err(to_mcp_error)?;
 
         // Get UI tree
         let request = Request {
@@ -3532,8 +3876,7 @@ impl NeuralBridgeServer {
             })),
         };
 
-        let response = conn.send_request(request).await
-            .map_err(to_mcp_error)?;
+        let response = conn.send_request(request).await.map_err(to_mcp_error)?;
 
         if !response.success {
             return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -3545,9 +3888,11 @@ impl NeuralBridgeServer {
         // Extract UI tree
         let ui_tree = match response.result {
             Some(pb::response::Result::UiTree(tree)) => tree,
-            _ => return Ok(CallToolResult::error(vec![Content::text(
-                "Invalid response: expected UI tree".to_string()
-            )])),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid response: expected UI tree".to_string(),
+                )]))
+            }
         };
 
         // Audit elements for accessibility issues
@@ -3624,7 +3969,9 @@ impl NeuralBridgeServer {
             "score": if violations.is_empty() { "Pass" } else { "Fail" },
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -3642,17 +3989,20 @@ impl NeuralBridgeServer {
         let query = params.query.to_lowercase();
         let category_filter = params.category.as_deref().map(|c| c.to_lowercase());
 
-        let mut results: Vec<(&str, &str, &str, usize)> = TOOL_CATALOG.iter()
-            .filter(|(_, _, cat)| {
-                category_filter.as_ref().map_or(true, |f| cat == f)
-            })
+        let mut results: Vec<(&str, &str, &str, usize)> = TOOL_CATALOG
+            .iter()
+            .filter(|(_, _, cat)| category_filter.as_ref().is_none_or(|f| cat == f))
             .filter_map(|(name, desc, cat)| {
                 let name_lower = name.to_lowercase();
                 let desc_lower = desc.to_lowercase();
                 // Score: exact name match > name contains > desc contains
-                let score = if name_lower.contains(&query) { 2 }
-                    else if desc_lower.contains(&query) { 1 }
-                    else { return None };
+                let score = if name_lower.contains(&query) {
+                    2
+                } else if desc_lower.contains(&query) {
+                    1
+                } else {
+                    return None;
+                };
                 Some((*name, *desc, *cat, score))
             })
             .collect();
@@ -3668,7 +4018,9 @@ impl NeuralBridgeServer {
             "tools": tools_json,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -3691,7 +4043,9 @@ impl NeuralBridgeServer {
         }).collect();
 
         let result = serde_json::json!({ "tools": descriptions });
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -3709,7 +4063,9 @@ impl NeuralBridgeServer {
         info!("Tool: android_list_devices");
 
         // Discover devices via ADB (always refreshes)
-        let device_ids = self.state.device_manager()
+        let device_ids = self
+            .state
+            .device_manager()
             .discover_devices()
             .await
             .map_err(to_mcp_error)?;
@@ -3720,7 +4076,9 @@ impl NeuralBridgeServer {
                 "total_count": 0,
                 "selected_device": null,
             });
-            return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+            return Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )]));
         }
 
         // Get currently selected device
@@ -3734,10 +4092,17 @@ impl NeuralBridgeServer {
 
             device_futures.push(async move {
                 // Get device info
-                let device_info = device_manager.get_device_info(&device_id_clone).await.ok().flatten();
+                let device_info = device_manager
+                    .get_device_info(&device_id_clone)
+                    .await
+                    .ok()
+                    .flatten();
 
                 // Check permissions
-                let permission_status = device_manager.check_permissions(&device_id_clone).await.ok();
+                let permission_status = device_manager
+                    .check_permissions(&device_id_clone)
+                    .await
+                    .ok();
 
                 (device_id_clone, device_info, permission_status)
             });
@@ -3747,29 +4112,50 @@ impl NeuralBridgeServer {
         let results = futures::future::join_all(device_futures).await;
 
         // Build device list JSON
-        let devices: Vec<serde_json::Value> = results.into_iter().map(|(device_id, info, perms)| {
-            let model = info.as_ref().and_then(|i| i.model.clone()).unwrap_or_else(|| "Unknown".to_string());
-            let android_version = info.as_ref().and_then(|i| i.android_version.clone()).unwrap_or_else(|| "Unknown".to_string());
-            let state = info.as_ref().map(|i| i.state.clone()).unwrap_or_else(|| "unknown".to_string());
+        let devices: Vec<serde_json::Value> = results
+            .into_iter()
+            .map(|(device_id, info, perms)| {
+                let model = info
+                    .as_ref()
+                    .and_then(|i| i.model.clone())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let android_version = info
+                    .as_ref()
+                    .and_then(|i| i.android_version.clone())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let state = info
+                    .as_ref()
+                    .map(|i| i.state.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
 
-            let companion_installed = perms.as_ref().map(|p| p.companion_installed).unwrap_or(false);
-            let accessibility_enabled = perms.as_ref().map(|p| p.accessibility_enabled).unwrap_or(false);
-            let notification_listener = perms.as_ref().map(|p| p.notification_listener_enabled).unwrap_or(false);
-            let is_ready = perms.as_ref().map(|p| p.is_ready()).unwrap_or(false);
-            let is_selected = selected_device.as_ref() == Some(&device_id);
+                let companion_installed = perms
+                    .as_ref()
+                    .map(|p| p.companion_installed)
+                    .unwrap_or(false);
+                let accessibility_enabled = perms
+                    .as_ref()
+                    .map(|p| p.accessibility_enabled)
+                    .unwrap_or(false);
+                let notification_listener = perms
+                    .as_ref()
+                    .map(|p| p.notification_listener_enabled)
+                    .unwrap_or(false);
+                let is_ready = perms.as_ref().map(|p| p.is_ready()).unwrap_or(false);
+                let is_selected = selected_device.as_ref() == Some(&device_id);
 
-            serde_json::json!({
-                "device_id": device_id,
-                "model": model,
-                "android_version": android_version,
-                "state": state,
-                "companion_installed": companion_installed,
-                "accessibility_enabled": accessibility_enabled,
-                "notification_listener": notification_listener,
-                "is_ready": is_ready,
-                "is_selected": is_selected,
+                serde_json::json!({
+                    "device_id": device_id,
+                    "model": model,
+                    "android_version": android_version,
+                    "state": state,
+                    "companion_installed": companion_installed,
+                    "accessibility_enabled": accessibility_enabled,
+                    "notification_listener": notification_listener,
+                    "is_ready": is_ready,
+                    "is_selected": is_selected,
+                })
             })
-        }).collect();
+            .collect();
 
         let result = serde_json::json!({
             "devices": devices,
@@ -3777,7 +4163,9 @@ impl NeuralBridgeServer {
             "selected_device": selected_device,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
@@ -3788,10 +4176,17 @@ impl NeuralBridgeServer {
         &self,
         Parameters(params): Parameters<SelectDeviceParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!("Tool: android_select_device (device_id: {})", params.device_id);
+        info!(
+            "Tool: android_select_device (device_id: {})",
+            params.device_id
+        );
 
         // Validate device_id format (alphanumeric + `.:-_`)
-        if !params.device_id.chars().all(|c| c.is_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_') {
+        if !params
+            .device_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_')
+        {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Invalid device_id format: '{}'. Must contain only alphanumeric characters and '.:-_'",
                 params.device_id
@@ -3799,7 +4194,9 @@ impl NeuralBridgeServer {
         }
 
         // Verify device exists in ADB
-        let discovered_devices = self.state.device_manager()
+        let discovered_devices = self
+            .state
+            .device_manager()
             .discover_devices()
             .await
             .map_err(to_mcp_error)?;
@@ -3822,12 +4219,19 @@ impl NeuralBridgeServer {
                 self.state.clear_connection().await;
 
                 // Remove port forwarding
-                if let Err(e) = self.state.device_manager().remove_port_forwarding(&params.device_id).await {
+                if let Err(e) = self
+                    .state
+                    .device_manager()
+                    .remove_port_forwarding(&params.device_id)
+                    .await
+                {
                     warn!("Failed to remove port forwarding (non-fatal): {}", e);
                 }
 
                 // Reset permissions checked flag
-                self.state.permissions_checked.store(false, std::sync::atomic::Ordering::SeqCst);
+                self.state
+                    .permissions_checked
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }
 
@@ -3839,7 +4243,9 @@ impl NeuralBridgeServer {
 
         // Set auto_enable_permissions flag if requested
         let auto_enable = params.auto_enable_permissions.unwrap_or(false);
-        self.state.auto_enable_permissions.store(auto_enable, std::sync::atomic::Ordering::SeqCst);
+        self.state
+            .auto_enable_permissions
+            .store(auto_enable, std::sync::atomic::Ordering::SeqCst);
 
         // Eagerly connect to the device
         info!("Establishing connection to device: {}", params.device_id);
@@ -3847,7 +4253,9 @@ impl NeuralBridgeServer {
         // Check permissions (auto-enable if requested)
         if let Err(e) = self.state.check_companion_ready(auto_enable).await {
             // Get permission status for error message
-            let permission_status = self.state.device_manager()
+            let permission_status = self
+                .state
+                .device_manager()
                 .check_permissions(&params.device_id)
                 .await
                 .map_err(to_mcp_error)?;
@@ -3864,11 +4272,18 @@ impl NeuralBridgeServer {
                 "error": format!("Device selected but companion app not ready: {}", e),
             });
 
-            return Ok(CallToolResult::success(vec![Content::text(result.to_string())]));
+            return Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )]));
         }
 
         // Setup port forwarding
-        if let Err(e) = self.state.device_manager().setup_port_forwarding(&params.device_id).await {
+        if let Err(e) = self
+            .state
+            .device_manager()
+            .setup_port_forwarding(&params.device_id)
+            .await
+        {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to setup port forwarding: {}",
                 e
@@ -3879,12 +4294,16 @@ impl NeuralBridgeServer {
         match self.state.get_connection().await {
             Ok(_conn) => {
                 // Get device info for response
-                let device_info = self.state.device_manager()
+                let device_info = self
+                    .state
+                    .device_manager()
                     .get_device_info(&params.device_id)
                     .await
                     .map_err(to_mcp_error)?;
 
-                let permission_status = self.state.device_manager()
+                let permission_status = self
+                    .state
+                    .device_manager()
                     .check_permissions(&params.device_id)
                     .await
                     .map_err(to_mcp_error)?;
@@ -3895,7 +4314,7 @@ impl NeuralBridgeServer {
                     .unwrap_or_else(|| "Unknown".to_string());
 
                 let result = serde_json::json!({
-        
+
                     "device_id": params.device_id,
                     "model": model,
                     "companion_status": "connected",
@@ -3906,14 +4325,14 @@ impl NeuralBridgeServer {
                     }
                 });
 
-                Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+                Ok(CallToolResult::success(vec![Content::text(
+                    result.to_string(),
+                )]))
             }
-            Err(e) => {
-                Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Device selected but failed to connect: {}. Companion app may not be running.",
-                    e
-                ))]))
-            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Device selected but failed to connect: {}. Companion app may not be running.",
+                e
+            ))])),
         }
     }
 }
@@ -3928,7 +4347,7 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 
@@ -4029,7 +4448,10 @@ async fn main() -> Result<()> {
             }
             // If multiple devices, log and let agent choose
             if device_id.is_none() && discovered.len() > 1 {
-                info!("{} devices found. Use android_list_devices + android_select_device to choose.", discovered.len());
+                info!(
+                    "{} devices found. Use android_list_devices + android_select_device to choose.",
+                    discovered.len()
+                );
             }
         }
     }
@@ -4038,7 +4460,9 @@ async fn main() -> Result<()> {
 
     if let Some(ref selected) = device_id {
         *app_state.device_id.write().await = Some(selected.clone());
-        app_state.auto_enable_permissions.store(enable_permissions, Ordering::SeqCst);
+        app_state
+            .auto_enable_permissions
+            .store(enable_permissions, Ordering::SeqCst);
         info!("Starting MCP server for device: {}", selected);
         if enable_permissions {
             info!("Auto-enable permissions: ENABLED");
@@ -4048,11 +4472,15 @@ async fn main() -> Result<()> {
     }
 
     let server = NeuralBridgeServer::new(app_state);
-    let service = server.serve(stdio()).await
+    let service = server
+        .serve(stdio())
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to start MCP server: {}", e))?;
 
     info!("MCP server ready. Listening on stdio...");
-    service.waiting().await
+    service
+        .waiting()
+        .await
         .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
 
     Ok(())
@@ -4099,12 +4527,30 @@ async fn run_check_mode(device_manager: &DeviceManager) -> Result<()> {
 
         match device_manager.check_permissions(device_id).await {
             Ok(status) => {
-                eprintln!("   Companion app installed:       {}",
-                    if status.companion_installed { "✓" } else { "✗" });
-                eprintln!("   AccessibilityService enabled:  {}",
-                    if status.accessibility_enabled { "✓" } else { "✗" });
-                eprintln!("   NotificationListener enabled:  {}",
-                    if status.notification_listener_enabled { "✓" } else { "✗" });
+                eprintln!(
+                    "   Companion app installed:       {}",
+                    if status.companion_installed {
+                        "✓"
+                    } else {
+                        "✗"
+                    }
+                );
+                eprintln!(
+                    "   AccessibilityService enabled:  {}",
+                    if status.accessibility_enabled {
+                        "✓"
+                    } else {
+                        "✗"
+                    }
+                );
+                eprintln!(
+                    "   NotificationListener enabled:  {}",
+                    if status.notification_listener_enabled {
+                        "✓"
+                    } else {
+                        "✗"
+                    }
+                );
 
                 if status.is_ready() {
                     eprintln!("   Status: ✓ READY");
@@ -4165,7 +4611,9 @@ fn print_usage() {
     eprintln!("Options:");
     eprintln!("  --device <id>           Pre-select a specific device at startup");
     eprintln!("  --auto-discover         Auto-detect and select first ready device");
-    eprintln!("  --enable-permissions    Auto-enable AccessibilityService and NotificationListener");
+    eprintln!(
+        "  --enable-permissions    Auto-enable AccessibilityService and NotificationListener"
+    );
     eprintln!("  --check                 Run setup verification and show device status");
     eprintln!("  --help, -h              Show this help message");
     eprintln!();
@@ -4222,7 +4670,12 @@ mod tests {
         for (key_str, expected_code) in test_cases {
             let result = map_key_string_to_code(key_str);
             assert!(result.is_ok(), "Failed to map key: {}", key_str);
-            assert_eq!(result.unwrap(), expected_code, "Incorrect mapping for key: {}", key_str);
+            assert_eq!(
+                result.unwrap(),
+                expected_code,
+                "Incorrect mapping for key: {}",
+                key_str
+            );
         }
     }
 
@@ -4256,21 +4709,38 @@ mod tests {
             ("recents", pb::GlobalAction::GlobalRecents as i32),
             ("recent", pb::GlobalAction::GlobalRecents as i32),
             ("recent_apps", pb::GlobalAction::GlobalRecents as i32),
-            ("notifications", pb::GlobalAction::GlobalNotifications as i32),
+            (
+                "notifications",
+                pb::GlobalAction::GlobalNotifications as i32,
+            ),
             ("notification", pb::GlobalAction::GlobalNotifications as i32),
-            ("quick_settings", pb::GlobalAction::GlobalQuickSettings as i32),
-            ("quicksettings", pb::GlobalAction::GlobalQuickSettings as i32),
+            (
+                "quick_settings",
+                pb::GlobalAction::GlobalQuickSettings as i32,
+            ),
+            (
+                "quicksettings",
+                pb::GlobalAction::GlobalQuickSettings as i32,
+            ),
             ("lock_screen", pb::GlobalAction::GlobalLockScreen as i32),
             ("lockscreen", pb::GlobalAction::GlobalLockScreen as i32),
             ("lock", pb::GlobalAction::GlobalLockScreen as i32),
             ("screenshot", pb::GlobalAction::GlobalTakeScreenshot as i32),
-            ("take_screenshot", pb::GlobalAction::GlobalTakeScreenshot as i32),
+            (
+                "take_screenshot",
+                pb::GlobalAction::GlobalTakeScreenshot as i32,
+            ),
         ];
 
         for (action_str, expected_code) in test_cases {
             let result = map_action_string_to_code(action_str);
             assert!(result.is_ok(), "Failed to map action: {}", action_str);
-            assert_eq!(result.unwrap(), expected_code, "Incorrect mapping for action: {}", action_str);
+            assert_eq!(
+                result.unwrap(),
+                expected_code,
+                "Incorrect mapping for action: {}",
+                action_str
+            );
         }
     }
 
@@ -4336,69 +4806,180 @@ mod tests {
     #[test]
     fn test_validate_selector_with_resource_id() {
         let resource_id = Some(&"com.app:id/button".to_string());
-        let result = validate_selector(None, resource_id, None, None, None, None, None, None, None, None);
+        let result = validate_selector(
+            None,
+            resource_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(result.is_ok(), "Selector with resource_id should be valid");
     }
 
     #[test]
     fn test_validate_selector_with_content_desc() {
         let content_desc = Some(&"Submit button".to_string());
-        let result = validate_selector(None, None, content_desc, None, None, None, None, None, None, None);
+        let result = validate_selector(
+            None,
+            None,
+            content_desc,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(result.is_ok(), "Selector with content_desc should be valid");
     }
 
     #[test]
     fn test_validate_selector_with_class_name() {
         let class_name = Some(&"android.widget.Button".to_string());
-        let result = validate_selector(None, None, None, class_name, None, None, None, None, None, None);
+        let result = validate_selector(
+            None, None, None, class_name, None, None, None, None, None, None,
+        );
         assert!(result.is_ok(), "Selector with class_name should be valid");
     }
 
     #[test]
     fn test_validate_selector_all_empty() {
         let result = validate_selector(None, None, None, None, None, None, None, None, None, None);
-        assert!(result.is_err(), "Selector with all empty fields should fail");
+        assert!(
+            result.is_err(),
+            "Selector with all empty fields should fail"
+        );
     }
 
     #[test]
     fn test_validate_selector_empty_strings() {
         let empty_text = Some(&String::new());
         let empty_resource_id = Some(&String::new());
-        let result = validate_selector(empty_text, empty_resource_id, None, None, None, None, None, None, None, None);
-        assert!(result.is_err(), "Selector with only empty strings should fail");
+        let result = validate_selector(
+            empty_text,
+            empty_resource_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "Selector with only empty strings should fail"
+        );
     }
 
     #[test]
     fn test_validate_selector_mixed() {
         let text = Some(&"Login".to_string());
         let empty_resource_id = Some(&String::new());
-        let result = validate_selector(text, empty_resource_id, None, None, None, None, None, None, None, None);
-        assert!(result.is_ok(), "Selector with at least one non-empty field should be valid");
+        let result = validate_selector(
+            text,
+            empty_resource_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "Selector with at least one non-empty field should be valid"
+        );
     }
 
     #[test]
     fn test_validate_selector_with_clickable_only() {
-        let result = validate_selector(None, None, None, None, Some(true), None, None, None, None, None);
-        assert!(result.is_ok(), "Selector with only clickable filter should be valid");
+        let result = validate_selector(
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "Selector with only clickable filter should be valid"
+        );
     }
 
     #[test]
     fn test_validate_selector_with_scrollable_only() {
-        let result = validate_selector(None, None, None, None, None, Some(false), None, None, None, None);
-        assert!(result.is_ok(), "Selector with only scrollable filter should be valid");
+        let result = validate_selector(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "Selector with only scrollable filter should be valid"
+        );
     }
 
     #[test]
     fn test_validate_selector_with_multiple_boolean_filters() {
-        let result = validate_selector(None, None, None, None, Some(true), Some(false), None, None, None, None);
-        assert!(result.is_ok(), "Selector with multiple boolean filters should be valid");
+        let result = validate_selector(
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "Selector with multiple boolean filters should be valid"
+        );
     }
 
     #[test]
     fn test_validate_selector_with_text_and_boolean() {
         let text = Some(&"Login".to_string());
-        let result = validate_selector(text, None, None, None, Some(true), None, None, None, None, None);
-        assert!(result.is_ok(), "Selector with text and boolean filter should be valid");
+        let result = validate_selector(
+            text,
+            None,
+            None,
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "Selector with text and boolean filter should be valid"
+        );
     }
 
     #[tokio::test]
@@ -4436,7 +5017,10 @@ mod tests {
         // Test that event type string mapping is correct
         let test_cases = vec![
             ("ui_change", pb::EventType::UiChange as i32),
-            ("notification_posted", pb::EventType::NotificationPosted as i32),
+            (
+                "notification_posted",
+                pb::EventType::NotificationPosted as i32,
+            ),
             ("toast_shown", pb::EventType::ToastShown as i32),
             ("app_crash", pb::EventType::AppCrash as i32),
         ];
@@ -4450,7 +5034,12 @@ mod tests {
                 _ => None,
             };
 
-            assert_eq!(mapped, Some(expected_code), "Failed to map event type: {}", type_str);
+            assert_eq!(
+                mapped,
+                Some(expected_code),
+                "Failed to map event type: {}",
+                type_str
+            );
         }
     }
 
@@ -4505,7 +5094,9 @@ mod tests {
         let mcp_error = to_mcp_error(error);
 
         assert_eq!(mcp_error.code, ErrorCode::INTERNAL_ERROR);
-        assert!(mcp_error.message.contains("Failed to connect to companion app"));
+        assert!(mcp_error
+            .message
+            .contains("Failed to connect to companion app"));
         assert!(mcp_error.message.contains("Troubleshooting checklist"));
         assert!(mcp_error.message.contains("adb forward tcp:38472"));
         assert!(mcp_error.message.contains("AccessibilityService"));
@@ -4518,7 +5109,9 @@ mod tests {
         let mcp_error = to_mcp_error(error);
 
         assert_eq!(mcp_error.code, ErrorCode::INTERNAL_ERROR);
-        assert!(mcp_error.message.contains("Failed to connect to companion app"));
+        assert!(mcp_error
+            .message
+            .contains("Failed to connect to companion app"));
         assert!(mcp_error.message.contains("companion app is installed"));
         assert!(mcp_error.message.contains("adb logcat"));
     }
@@ -4532,7 +5125,9 @@ mod tests {
         assert_eq!(mcp_error.code, ErrorCode::INTERNAL_ERROR);
         assert!(mcp_error.message.contains("ADB operation failed"));
         assert!(mcp_error.message.contains("adb devices"));
-        assert!(mcp_error.message.contains("device is connected and authorized"));
+        assert!(mcp_error
+            .message
+            .contains("device is connected and authorized"));
         assert!(mcp_error.message.contains("adb kill-server"));
     }
 
@@ -4589,12 +5184,16 @@ mod tests {
         // Test with uppercase
         let error1 = anyhow::anyhow!("CONNECTION REFUSED");
         let mcp_error1 = to_mcp_error(error1);
-        assert!(mcp_error1.message.contains("Failed to connect to companion app"));
+        assert!(mcp_error1
+            .message
+            .contains("Failed to connect to companion app"));
 
         // Test with mixed case
         let error2 = anyhow::anyhow!("Connection Timeout");
         let mcp_error2 = to_mcp_error(error2);
-        assert!(mcp_error2.message.contains("Failed to connect to companion app"));
+        assert!(mcp_error2
+            .message
+            .contains("Failed to connect to companion app"));
 
         // Test with lowercase
         let error3 = anyhow::anyhow!("adb device not found");
@@ -4616,7 +5215,9 @@ mod tests {
             let error = anyhow::anyhow!("{}", error_msg);
             let mcp_error = to_mcp_error(error);
             assert!(
-                mcp_error.message.contains("Failed to connect to companion app"),
+                mcp_error
+                    .message
+                    .contains("Failed to connect to companion app"),
                 "Error '{}' should be classified as connection error",
                 error_msg
             );

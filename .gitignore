@@ -6,7 +6,8 @@
 # Rust (mcp-server)
 # ------------------------------------------
 **/target/
-**/Cargo.lock
+# Cargo.lock is intentionally tracked for binary crates (reproducible builds)
+# **/Cargo.lock  -- DO NOT ignore Cargo.lock
 **/src/protocol/generated/
 **/*.rs.bk
 **/*.pdb
@@ -201,8 +202,10 @@ tests/reports/
 # Documentation (keep source, ignore generated)
 # ------------------------------------------
 # Keep all markdown files committed
-# Ignore generated docs if any
+# Ignore generated docs and internal non-markdown docs
 docs/generated/
+docs/*.html
+docs/*.pdf
 
 # ------------------------------------------
 # Miscellaneous

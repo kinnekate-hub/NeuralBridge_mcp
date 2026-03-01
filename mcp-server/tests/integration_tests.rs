@@ -6,28 +6,24 @@
  * Run with: cargo test --test integration_tests -- --test-threads=1 --nocapture
  */
 
-use anyhow::{Result, Context, bail};
+use anyhow::{bail, Context, Result};
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use uuid::Uuid;
 
 // Import protocol types
+use neuralbridge_mcp::protocol::codec::{encode_message, MessageFramer, MessageType};
 use neuralbridge_mcp::protocol::pb::{
-    Request, Response, Event, request::Command,
-    GetUiTreeRequest, ScreenshotRequest, FindElementsRequest, GetForegroundAppRequest,
-    TapRequest, LongPressRequest, SwipeRequest, InputTextRequest,
-    PressKeyRequest, GlobalActionRequest,
-    LaunchAppRequest, CloseAppRequest, OpenUrlRequest,
+    double_tap_request, input_text_request, launch_app_request, long_press_request,
+    request::Command, tap_request, CloseAppRequest, Direction, DoubleTapRequest, DragRequest,
+    EnableEventsRequest, Event, EventType, FindElementsRequest, FlingRequest,
+    GetForegroundAppRequest, GetNotificationsRequest, GetUiTreeRequest, GlobalAction,
+    GlobalActionRequest, InputTextRequest, KeyCode, LaunchAppRequest, LongPressRequest,
+    OpenUrlRequest, PinchRequest, Point, PressKeyRequest, Request, Response, ScreenshotQuality,
+    ScreenshotRequest, Selector, SetClipboardRequest, SwipeRequest, TapRequest,
     WaitForElementRequest, WaitForIdleRequest,
-    EnableEventsRequest, GetNotificationsRequest,
-    DoubleTapRequest, PinchRequest, DragRequest, FlingRequest,
-    SetClipboardRequest,
-    Selector, Point, KeyCode, GlobalAction, ScreenshotQuality, EventType, Direction,
-    tap_request, long_press_request, input_text_request, launch_app_request,
-    double_tap_request,
 };
-use neuralbridge_mcp::protocol::codec::{MessageType, encode_message, MessageFramer};
 
 // ============================================================================
 // Test Configuration
@@ -63,7 +59,7 @@ impl TestConnection {
     async fn connect() -> Result<Self> {
         let stream = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            TcpStream::connect(("localhost", COMPANION_PORT))
+            TcpStream::connect(("localhost", COMPANION_PORT)),
         )
         .await
         .context("Connection timeout")?
@@ -150,7 +146,14 @@ async fn setup_test() -> Result<TestConnection> {
 async fn cleanup_test(_conn: &mut TestConnection) -> Result<()> {
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "am", "force-stop", "com.neuralbridge.testapp"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "force-stop",
+            "com.neuralbridge.testapp",
+        ])
         .output()
         .await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -160,8 +163,15 @@ async fn cleanup_test(_conn: &mut TestConnection) -> Result<()> {
 async fn launch_test_app() -> Result<()> {
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "am", "start",
-               "-n", "com.neuralbridge.testapp/.LoginActivity"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "com.neuralbridge.testapp/.LoginActivity",
+        ])
         .output()
         .await?;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -205,7 +215,10 @@ async fn test_001_connection_established() -> Result<()> {
     };
 
     let response = conn.send_request(request).await?;
-    println!("✓ Connection established (latency: {}ms)", response.latency_ms);
+    println!(
+        "✓ Connection established (latency: {}ms)",
+        response.latency_ms
+    );
     Ok(())
 }
 
@@ -223,7 +236,10 @@ async fn test_002_multiple_sequential_requests() -> Result<()> {
         };
 
         let response = conn.send_request(request).await?;
-        println!("✓ Request {} completed (latency: {}ms)", i, response.latency_ms);
+        println!(
+            "✓ Request {} completed (latency: {}ms)",
+            i, response.latency_ms
+        );
     }
 
     println!("✓ All sequential requests succeeded");
@@ -246,7 +262,14 @@ async fn test_003_connection_survives_home_press() -> Result<()> {
     // Press HOME
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "input", "keyevent", "KEYCODE_HOME"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "input",
+            "keyevent",
+            "KEYCODE_HOME",
+        ])
         .output()
         .await?;
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -285,7 +308,11 @@ async fn test_004_get_ui_tree() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "get_ui_tree should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "get_ui_tree should succeed: {}",
+        response.error_message
+    );
     println!("✓ get_ui_tree works");
     Ok(())
 }
@@ -309,7 +336,11 @@ async fn test_005_screenshot_full() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "screenshot should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "screenshot should succeed: {}",
+        response.error_message
+    );
     println!("✓ screenshot (full) works");
     Ok(())
 }
@@ -333,7 +364,11 @@ async fn test_006_screenshot_thumbnail() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "thumbnail should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "thumbnail should succeed: {}",
+        response.error_message
+    );
     println!("✓ screenshot (thumbnail) works");
     Ok(())
 }
@@ -358,7 +393,11 @@ async fn test_007_find_elements_by_text() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "find_elements should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "find_elements should succeed: {}",
+        response.error_message
+    );
     println!("✓ find_elements by text works");
     Ok(())
 }
@@ -383,7 +422,11 @@ async fn test_008_find_elements_by_resource_id() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "find_elements should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "find_elements should succeed: {}",
+        response.error_message
+    );
     println!("✓ find_elements by resource_id works");
     Ok(())
 }
@@ -418,7 +461,11 @@ async fn test_009_find_elements_multiple() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "find_elements should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "find_elements should succeed: {}",
+        response.error_message
+    );
     println!("✓ find_elements returns multiple matches");
     Ok(())
 }
@@ -439,7 +486,11 @@ async fn test_010_get_foreground_app() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "get_foreground_app should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "get_foreground_app should succeed: {}",
+        response.error_message
+    );
     println!("✓ get_foreground_app works");
     Ok(())
 }
@@ -464,7 +515,11 @@ async fn test_011_selector_combined_criteria() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "combined selector should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "combined selector should succeed: {}",
+        response.error_message
+    );
     println!("✓ Selector with combined criteria works");
     Ok(())
 }
@@ -491,7 +546,11 @@ async fn test_012_tap_by_coordinates() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "tap by coordinates should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "tap by coordinates should succeed: {}",
+        response.error_message
+    );
     println!("✓ Tap by coordinates works");
     Ok(())
 }
@@ -506,7 +565,7 @@ async fn test_013_tap_by_selector() -> Result<()> {
 
     // Use resource_id for unique match (more specific than text)
     let mut sel = selector(None, Some("button_login"));
-    sel.index = 0;  // Select first match if multiple elements have same resource_id
+    sel.index = 0; // Select first match if multiple elements have same resource_id
     let request = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::Tap(TapRequest {
@@ -517,7 +576,11 @@ async fn test_013_tap_by_selector() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "tap by selector should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "tap by selector should succeed: {}",
+        response.error_message
+    );
     println!("✓ Tap by selector works");
     Ok(())
 }
@@ -533,14 +596,21 @@ async fn test_014_tap_by_resource_id() -> Result<()> {
     let request = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::Tap(TapRequest {
-            target: Some(tap_request::Target::Selector(selector(None, Some("button_login")))),
+            target: Some(tap_request::Target::Selector(selector(
+                None,
+                Some("button_login"),
+            ))),
         })),
     };
 
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "tap by resource_id should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "tap by resource_id should succeed: {}",
+        response.error_message
+    );
     println!("✓ Tap by resource_id works");
     Ok(())
 }
@@ -556,7 +626,10 @@ async fn test_015_long_press() -> Result<()> {
     let request = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::LongPress(LongPressRequest {
-            target: Some(long_press_request::Target::Selector(selector(None, Some("username")))),
+            target: Some(long_press_request::Target::Selector(selector(
+                None,
+                Some("username"),
+            ))),
             duration_ms: 1000,
         })),
     };
@@ -564,7 +637,11 @@ async fn test_015_long_press() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "long_press should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "long_press should succeed: {}",
+        response.error_message
+    );
     println!("✓ Long press works");
     Ok(())
 }
@@ -589,7 +666,11 @@ async fn test_016_swipe() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "swipe should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "swipe should succeed: {}",
+        response.error_message
+    );
     println!("✓ Swipe works");
     Ok(())
 }
@@ -616,7 +697,11 @@ async fn test_017_press_key_back() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "press_key BACK should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "press_key BACK should succeed: {}",
+        response.error_message
+    );
     println!("✓ Press key BACK works");
     Ok(())
 }
@@ -643,7 +728,11 @@ async fn test_018_press_key_enter() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "press_key ENTER should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "press_key ENTER should succeed: {}",
+        response.error_message
+    );
     println!("✓ Press key ENTER works");
     Ok(())
 }
@@ -666,7 +755,11 @@ async fn test_019_global_action_home() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "global_action HOME should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "global_action HOME should succeed: {}",
+        response.error_message
+    );
     println!("✓ Global action HOME works");
     Ok(())
 }
@@ -686,7 +779,10 @@ async fn test_020_input_text_with_selector() -> Result<()> {
     let request = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::InputText(InputTextRequest {
-            target: Some(input_text_request::Target::Selector(selector(None, Some("username")))),
+            target: Some(input_text_request::Target::Selector(selector(
+                None,
+                Some("username"),
+            ))),
             text: "testuser123".to_string(),
             append: false,
         })),
@@ -695,7 +791,11 @@ async fn test_020_input_text_with_selector() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "input_text should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "input_text should succeed: {}",
+        response.error_message
+    );
     println!("✓ Input text with selector works");
     Ok(())
 }
@@ -712,7 +812,10 @@ async fn test_021_input_text_append() -> Result<()> {
     let req1 = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::InputText(InputTextRequest {
-            target: Some(input_text_request::Target::Selector(selector(None, Some("username")))),
+            target: Some(input_text_request::Target::Selector(selector(
+                None,
+                Some("username"),
+            ))),
             text: "test".to_string(),
             append: false,
         })),
@@ -724,7 +827,10 @@ async fn test_021_input_text_append() -> Result<()> {
     let req2 = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::InputText(InputTextRequest {
-            target: Some(input_text_request::Target::Selector(selector(None, Some("username")))),
+            target: Some(input_text_request::Target::Selector(selector(
+                None,
+                Some("username"),
+            ))),
             text: "user".to_string(),
             append: true,
         })),
@@ -733,7 +839,11 @@ async fn test_021_input_text_append() -> Result<()> {
     let response = conn.send_request(req2).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "input_text append should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "input_text append should succeed: {}",
+        response.error_message
+    );
     println!("✓ Input text append mode works");
     Ok(())
 }
@@ -749,7 +859,10 @@ async fn test_022_input_text_by_coordinates() -> Result<()> {
     let request = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::InputText(InputTextRequest {
-            target: Some(input_text_request::Target::Coordinates(Point { x: 640, y: 1400 })),
+            target: Some(input_text_request::Target::Coordinates(Point {
+                x: 640,
+                y: 1400,
+            })),
             text: "test".to_string(),
             append: false,
         })),
@@ -758,7 +871,11 @@ async fn test_022_input_text_by_coordinates() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "input_text by coords should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "input_text by coords should succeed: {}",
+        response.error_message
+    );
     println!("✓ Input text by coordinates works");
     Ok(())
 }
@@ -777,7 +894,9 @@ async fn test_023_launch_app() -> Result<()> {
     let request = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::LaunchApp(LaunchAppRequest {
-            target: Some(launch_app_request::Target::PackageName("com.android.settings".to_string())),
+            target: Some(launch_app_request::Target::PackageName(
+                "com.android.settings".to_string(),
+            )),
             clear_task: false,
         })),
     };
@@ -785,7 +904,11 @@ async fn test_023_launch_app() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "launch_app should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "launch_app should succeed: {}",
+        response.error_message
+    );
     println!("✓ Launch app works");
     Ok(())
 }
@@ -801,8 +924,14 @@ async fn test_024_close_app() -> Result<()> {
     // Force-stop requires ADB (SLOW PATH - companion app cannot force-stop)
     let device_id = get_test_device_id();
     let output = tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "am", "force-stop",
-               "com.neuralbridge.testapp"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "force-stop",
+            "com.neuralbridge.testapp",
+        ])
         .output()
         .await?;
 
@@ -830,7 +959,11 @@ async fn test_024a_close_app_graceful() -> Result<()> {
 
     let response = conn.send_request(request).await?;
 
-    assert!(response.success, "graceful close should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "graceful close should succeed: {}",
+        response.error_message
+    );
     println!("✓ Close app (graceful) works via companion app");
     Ok(())
 }
@@ -853,7 +986,11 @@ async fn test_025_open_url() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "open_url should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "open_url should succeed: {}",
+        response.error_message
+    );
     println!("✓ Open URL works");
     Ok(())
 }
@@ -888,7 +1025,11 @@ async fn test_026_wait_for_element() -> Result<()> {
     let elapsed = start.elapsed();
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "wait_for_element should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "wait_for_element should succeed: {}",
+        response.error_message
+    );
     println!("✓ Wait for element works (found after {:?})", elapsed);
     Ok(())
 }
@@ -936,7 +1077,11 @@ async fn test_028_wait_for_idle() -> Result<()> {
     let response = conn.send_request(request).await?;
     cleanup_test(&mut conn).await?;
 
-    assert!(response.success, "wait_for_idle should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "wait_for_idle should succeed: {}",
+        response.error_message
+    );
     println!("✓ Wait for idle works");
     Ok(())
 }
@@ -956,7 +1101,10 @@ async fn test_029_element_not_found() -> Result<()> {
     let request = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::Tap(TapRequest {
-            target: Some(tap_request::Target::Selector(selector(Some("NonExistent"), None))),
+            target: Some(tap_request::Target::Selector(selector(
+                Some("NonExistent"),
+                None,
+            ))),
         })),
     };
 
@@ -964,7 +1112,10 @@ async fn test_029_element_not_found() -> Result<()> {
     cleanup_test(&mut conn).await?;
 
     assert!(!response.success, "Should fail with element not found");
-    println!("✓ ELEMENT_NOT_FOUND error handled: {}", response.error_message);
+    println!(
+        "✓ ELEMENT_NOT_FOUND error handled: {}",
+        response.error_message
+    );
     Ok(())
 }
 
@@ -1028,7 +1179,15 @@ async fn verify_adb_port_forwarding(device_id: &str) -> Result<()> {
 
 async fn verify_companion_app_installed(device_id: &str) -> Result<()> {
     let output = tokio::process::Command::new("adb")
-        .args(["-s", device_id, "shell", "pm", "list", "packages", "com.neuralbridge.companion"])
+        .args([
+            "-s",
+            device_id,
+            "shell",
+            "pm",
+            "list",
+            "packages",
+            "com.neuralbridge.companion",
+        ])
         .output()
         .await?;
 
@@ -1040,7 +1199,15 @@ async fn verify_companion_app_installed(device_id: &str) -> Result<()> {
 
 async fn verify_accessibility_service(device_id: &str) -> Result<()> {
     let output = tokio::process::Command::new("adb")
-        .args(["-s", device_id, "shell", "settings", "get", "secure", "enabled_accessibility_services"])
+        .args([
+            "-s",
+            device_id,
+            "shell",
+            "settings",
+            "get",
+            "secure",
+            "enabled_accessibility_services",
+        ])
         .output()
         .await?;
 
@@ -1065,13 +1232,17 @@ async fn test_031_enable_events() -> Result<()> {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::EnableEvents(EnableEventsRequest {
             enable: true,
-            event_types: vec![],  // Empty = all event types
+            event_types: vec![], // Empty = all event types
         })),
     };
 
     let response = conn.send_request(request).await?;
 
-    assert!(response.success, "enable_events should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "enable_events should succeed: {}",
+        response.error_message
+    );
     println!("✓ Enable events works");
     Ok(())
 }
@@ -1093,7 +1264,11 @@ async fn test_032_event_streaming_ui_change() -> Result<()> {
         })),
     };
     let enable_resp = conn.send_request(enable_req).await?;
-    assert!(enable_resp.success, "Failed to enable events: {}", enable_resp.error_message);
+    assert!(
+        enable_resp.success,
+        "Failed to enable events: {}",
+        enable_resp.error_message
+    );
     println!("✓ Events enabled");
 
     // Wait longer for event system to fully initialize (pattern from test_043)
@@ -1109,7 +1284,14 @@ async fn test_032_event_streaming_ui_change() -> Result<()> {
     // Trigger UI change using reliable ADB command (pattern from test_043)
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "input", "keyevent", "KEYCODE_HOME"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "input",
+            "keyevent",
+            "KEYCODE_HOME",
+        ])
         .output()
         .await?;
     println!("✓ Triggered UI change (HOME key)");
@@ -1119,8 +1301,12 @@ async fn test_032_event_streaming_ui_change() -> Result<()> {
 
     match event {
         Some(evt) => {
-            assert_eq!(evt.event_type, EventType::UiChange as i32,
-                       "Expected UIChangeEvent, got type: {}", evt.event_type);
+            assert_eq!(
+                evt.event_type,
+                EventType::UiChange as i32,
+                "Expected UIChangeEvent, got type: {}",
+                evt.event_type
+            );
             println!("✓ Received UIChangeEvent: id={}", evt.event_id);
         }
         None => {
@@ -1230,10 +1416,21 @@ async fn test_034_get_notifications() -> Result<()> {
     // Post a test notification using ADB
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell",
-               "am", "broadcast", "-a", "android.intent.action.SHOW_NOTIFICATION",
-               "--es", "title", "Test Notification",
-               "--es", "text", "This is a test"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "broadcast",
+            "-a",
+            "android.intent.action.SHOW_NOTIFICATION",
+            "--es",
+            "title",
+            "Test Notification",
+            "--es",
+            "text",
+            "This is a test",
+        ])
         .output()
         .await?;
 
@@ -1248,7 +1445,11 @@ async fn test_034_get_notifications() -> Result<()> {
 
     let response = conn.send_request(request).await?;
 
-    assert!(response.success, "get_notifications should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "get_notifications should succeed: {}",
+        response.error_message
+    );
     println!("✓ Get notifications works");
     Ok(())
 }
@@ -1267,8 +1468,15 @@ async fn test_035_double_tap_by_coordinates() -> Result<()> {
     // Launch Settings for a stable UI
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "am", "start", "-n",
-               "com.android.settings/.Settings"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "com.android.settings/.Settings",
+        ])
         .output()
         .await?;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -1277,15 +1485,25 @@ async fn test_035_double_tap_by_coordinates() -> Result<()> {
     let request = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::DoubleTap(DoubleTapRequest {
-            target: Some(double_tap_request::Target::Coordinates(Point { x: 540, y: 960 })),
+            target: Some(double_tap_request::Target::Coordinates(Point {
+                x: 540,
+                y: 960,
+            })),
         })),
     };
 
     let response = conn.send_request(request).await?;
     let latency = start.elapsed();
 
-    assert!(response.success, "double_tap by coordinates should succeed: {}", response.error_message);
-    println!("✓ Double tap by coordinates works (latency: {:?}, reported: {}ms)", latency, response.latency_ms);
+    assert!(
+        response.success,
+        "double_tap by coordinates should succeed: {}",
+        response.error_message
+    );
+    println!(
+        "✓ Double tap by coordinates works (latency: {:?}, reported: {}ms)",
+        latency, response.latency_ms
+    );
     Ok(())
 }
 
@@ -1299,8 +1517,15 @@ async fn test_036_pinch_zoom() -> Result<()> {
     // Launch Settings for a stable UI
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "am", "start", "-n",
-               "com.android.settings/.Settings"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "com.android.settings/.Settings",
+        ])
         .output()
         .await?;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -1318,7 +1543,11 @@ async fn test_036_pinch_zoom() -> Result<()> {
 
     let response_in = conn.send_request(request_in).await?;
     let latency_in = start.elapsed();
-    assert!(response_in.success, "pinch zoom in should succeed: {}", response_in.error_message);
+    assert!(
+        response_in.success,
+        "pinch zoom in should succeed: {}",
+        response_in.error_message
+    );
     println!("✓ Pinch zoom in works (latency: {:?})", latency_in);
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1336,7 +1565,11 @@ async fn test_036_pinch_zoom() -> Result<()> {
 
     let response_out = conn.send_request(request_out).await?;
     let latency_out = start.elapsed();
-    assert!(response_out.success, "pinch zoom out should succeed: {}", response_out.error_message);
+    assert!(
+        response_out.success,
+        "pinch zoom out should succeed: {}",
+        response_out.error_message
+    );
     println!("✓ Pinch zoom out works (latency: {:?})", latency_out);
     Ok(())
 }
@@ -1351,8 +1584,15 @@ async fn test_037_drag() -> Result<()> {
     // Launch Settings for a stable UI
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "am", "start", "-n",
-               "com.android.settings/.Settings"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "com.android.settings/.Settings",
+        ])
         .output()
         .await?;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -1370,8 +1610,15 @@ async fn test_037_drag() -> Result<()> {
     let response = conn.send_request(request).await?;
     let latency = start.elapsed();
 
-    assert!(response.success, "drag should succeed: {}", response.error_message);
-    println!("✓ Drag gesture works (latency: {:?}, reported: {}ms)", latency, response.latency_ms);
+    assert!(
+        response.success,
+        "drag should succeed: {}",
+        response.error_message
+    );
+    println!(
+        "✓ Drag gesture works (latency: {:?}, reported: {}ms)",
+        latency, response.latency_ms
+    );
     Ok(())
 }
 
@@ -1385,8 +1632,15 @@ async fn test_038_fling_all_directions() -> Result<()> {
     // Launch Settings for a scrollable UI
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "am", "start", "-n",
-               "com.android.settings/.Settings"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "com.android.settings/.Settings",
+        ])
         .output()
         .await?;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -1402,15 +1656,17 @@ async fn test_038_fling_all_directions() -> Result<()> {
         let start = std::time::Instant::now();
         let request = Request {
             request_id: Uuid::new_v4().to_string(),
-            command: Some(Command::Fling(FlingRequest {
-                direction: dir,
-            })),
+            command: Some(Command::Fling(FlingRequest { direction: dir })),
         };
 
         let response = conn.send_request(request).await?;
         let latency = start.elapsed();
 
-        assert!(response.success, "fling {} should succeed: {}", name, response.error_message);
+        assert!(
+            response.success,
+            "fling {} should succeed: {}",
+            name, response.error_message
+        );
         println!("  ✓ Fling {} works (latency: {:?})", name, latency);
 
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1441,7 +1697,11 @@ async fn test_039_set_clipboard() -> Result<()> {
 
     let response = conn.send_request(request).await?;
 
-    assert!(response.success, "set_clipboard should succeed: {}", response.error_message);
+    assert!(
+        response.success,
+        "set_clipboard should succeed: {}",
+        response.error_message
+    );
     println!("✓ Set clipboard works (latency: {}ms)", response.latency_ms);
     Ok(())
 }
@@ -1463,7 +1723,11 @@ async fn test_040_clipboard_roundtrip() -> Result<()> {
     };
 
     let set_resp = conn.send_request(set_req).await?;
-    assert!(set_resp.success, "set_clipboard should succeed: {}", set_resp.error_message);
+    assert!(
+        set_resp.success,
+        "set_clipboard should succeed: {}",
+        set_resp.error_message
+    );
     println!("✓ Clipboard set via companion app");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1482,7 +1746,10 @@ async fn test_040_clipboard_roundtrip() -> Result<()> {
     if clipboard_text.contains(test_text) {
         println!("✓ Clipboard round-trip verified: '{}'", clipboard_text);
     } else {
-        println!("⚠ Clipboard mismatch: expected '{}', got '{}'", test_text, clipboard_text);
+        println!(
+            "⚠ Clipboard mismatch: expected '{}', got '{}'",
+            test_text, clipboard_text
+        );
         println!("  Note: Clipboard access restrictions may apply on this Android version");
     }
     Ok(())
@@ -1502,8 +1769,15 @@ async fn test_041_gesture_latency() -> Result<()> {
     // Launch Settings for a stable UI
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "am", "start", "-n",
-               "com.android.settings/.Settings"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "com.android.settings/.Settings",
+        ])
         .output()
         .await?;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -1523,7 +1797,12 @@ async fn test_041_gesture_latency() -> Result<()> {
 
         assert!(response.success, "tap should succeed");
         tap_latencies.push(elapsed);
-        println!("  Tap #{}: {:?} (reported: {}ms)", i+1, elapsed, response.latency_ms);
+        println!(
+            "  Tap #{}: {:?} (reported: {}ms)",
+            i + 1,
+            elapsed,
+            response.latency_ms
+        );
 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -1545,14 +1824,21 @@ async fn test_041_gesture_latency() -> Result<()> {
 
         assert!(response.success, "swipe should succeed");
         swipe_latencies.push(elapsed);
-        println!("  Swipe #{}: {:?} (reported: {}ms)", i+1, elapsed, response.latency_ms);
+        println!(
+            "  Swipe #{}: {:?} (reported: {}ms)",
+            i + 1,
+            elapsed,
+            response.latency_ms
+        );
 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     // Calculate averages
-    let avg_tap = tap_latencies.iter().map(|d| d.as_millis()).sum::<u128>() / tap_latencies.len() as u128;
-    let avg_swipe = swipe_latencies.iter().map(|d| d.as_millis()).sum::<u128>() / swipe_latencies.len() as u128;
+    let avg_tap =
+        tap_latencies.iter().map(|d| d.as_millis()).sum::<u128>() / tap_latencies.len() as u128;
+    let avg_swipe =
+        swipe_latencies.iter().map(|d| d.as_millis()).sum::<u128>() / swipe_latencies.len() as u128;
 
     println!("\n  Performance Summary:");
     println!("  Avg tap latency: {}ms (target: <100ms)", avg_tap);
@@ -1583,8 +1869,15 @@ async fn test_042_advanced_gesture_latency() -> Result<()> {
     // Launch Settings for a stable UI
     let device_id = get_test_device_id();
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "am", "start", "-n",
-               "com.android.settings/.Settings"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "com.android.settings/.Settings",
+        ])
         .output()
         .await?;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -1594,13 +1887,19 @@ async fn test_042_advanced_gesture_latency() -> Result<()> {
     let request = Request {
         request_id: Uuid::new_v4().to_string(),
         command: Some(Command::DoubleTap(DoubleTapRequest {
-            target: Some(double_tap_request::Target::Coordinates(Point { x: 540, y: 960 })),
+            target: Some(double_tap_request::Target::Coordinates(Point {
+                x: 540,
+                y: 960,
+            })),
         })),
     };
     let response = conn.send_request(request).await?;
     let dt_latency = start.elapsed();
     assert!(response.success, "double_tap should succeed");
-    println!("  Double tap: {:?} (reported: {}ms)", dt_latency, response.latency_ms);
+    println!(
+        "  Double tap: {:?} (reported: {}ms)",
+        dt_latency, response.latency_ms
+    );
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -1615,7 +1914,10 @@ async fn test_042_advanced_gesture_latency() -> Result<()> {
     let response = conn.send_request(request).await?;
     let fling_latency = start.elapsed();
     assert!(response.success, "fling should succeed");
-    println!("  Fling: {:?} (reported: {}ms)", fling_latency, response.latency_ms);
+    println!(
+        "  Fling: {:?} (reported: {}ms)",
+        fling_latency, response.latency_ms
+    );
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -1632,12 +1934,18 @@ async fn test_042_advanced_gesture_latency() -> Result<()> {
     let response = conn.send_request(request).await?;
     let drag_latency = start.elapsed();
     assert!(response.success, "drag should succeed");
-    println!("  Drag: {:?} (reported: {}ms)", drag_latency, response.latency_ms);
+    println!(
+        "  Drag: {:?} (reported: {}ms)",
+        drag_latency, response.latency_ms
+    );
 
     println!("\n  Advanced Gesture Latency Summary:");
     println!("  Double tap: {}ms", dt_latency.as_millis());
     println!("  Fling: {}ms", fling_latency.as_millis());
-    println!("  Drag: {}ms (includes 300ms gesture duration)", drag_latency.as_millis());
+    println!(
+        "  Drag: {}ms (includes 300ms gesture duration)",
+        drag_latency.as_millis()
+    );
 
     println!("✓ Advanced gesture performance benchmark complete");
     Ok(())
@@ -1663,7 +1971,11 @@ async fn test_043_event_streaming_extended() -> Result<()> {
         })),
     };
     let enable_resp = conn.send_request(enable_req).await?;
-    assert!(enable_resp.success, "Failed to enable events: {}", enable_resp.error_message);
+    assert!(
+        enable_resp.success,
+        "Failed to enable events: {}",
+        enable_resp.error_message
+    );
     println!("✓ Events enabled");
 
     // Wait for event system to initialize
@@ -1681,15 +1993,29 @@ async fn test_043_event_streaming_extended() -> Result<()> {
 
     // Open Settings
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "am", "start", "-n",
-               "com.android.settings/.Settings"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "com.android.settings/.Settings",
+        ])
         .output()
         .await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Press HOME to trigger UI change
     tokio::process::Command::new("adb")
-        .args(["-s", &device_id, "shell", "input", "keyevent", "KEYCODE_HOME"])
+        .args([
+            "-s",
+            &device_id,
+            "shell",
+            "input",
+            "keyevent",
+            "KEYCODE_HOME",
+        ])
         .output()
         .await?;
 
@@ -1700,7 +2026,10 @@ async fn test_043_event_streaming_extended() -> Result<()> {
         match conn.read_event(Duration::from_millis(500)).await {
             Ok(Some(evt)) => {
                 let latency = start.elapsed();
-                println!("  ✓ Received event: type={}, id={} (at {:?})", evt.event_type, evt.event_id, latency);
+                println!(
+                    "  ✓ Received event: type={}, id={} (at {:?})",
+                    evt.event_type, evt.event_id, latency
+                );
                 event_count += 1;
             }
             Ok(None) => {
@@ -1726,9 +2055,14 @@ async fn test_043_event_streaming_extended() -> Result<()> {
 
     println!("\n  Total events received: {}", event_count);
     if event_count > 0 {
-        println!("✓ Event streaming confirmed working ({} events)", event_count);
+        println!(
+            "✓ Event streaming confirmed working ({} events)",
+            event_count
+        );
     } else {
-        println!("⚠ No events received - companion app may not be pushing events to this connection");
+        println!(
+            "⚠ No events received - companion app may not be pushing events to this connection"
+        );
         println!("  Note: Companion logcat shows events ARE being generated. This is a test client issue.");
     }
     Ok(())

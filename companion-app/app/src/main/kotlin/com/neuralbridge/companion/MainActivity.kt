@@ -24,6 +24,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.Spinner
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
@@ -38,6 +39,8 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_CODE_POST_NOTIFICATIONS = 1001
+        private const val PREFS_NAME = "neuralbridge_prefs"
+        private const val KEY_ENABLED = "nb_enabled"
     }
 
     // Tab views
@@ -52,6 +55,9 @@ class MainActivity : Activity() {
     // Header
     private lateinit var statusDot: View
     private lateinit var overallStatusText: TextView
+
+    // Master toggle
+    private lateinit var masterToggle: Switch
 
     // Status tab views
     private lateinit var connectionStatusIcon: TextView
@@ -100,11 +106,11 @@ class MainActivity : Activity() {
 
         findViews()
         setupTabs()
+        setupMasterToggle()
         setupSetupTab()
         setupLogsTab()
         updateDeviceInfo()
 
-        requestNotificationPermissionIfNeeded()
         updateAllPermissionStatus()
     }
 
@@ -133,6 +139,9 @@ class MainActivity : Activity() {
         // Header
         statusDot = findViewById(R.id.statusDot)
         overallStatusText = findViewById(R.id.overallStatusText)
+
+        // Master toggle
+        masterToggle = findViewById(R.id.masterToggle)
 
         // Status tab
         connectionStatusIcon = findViewById(R.id.connectionStatusIcon)
@@ -202,16 +211,42 @@ class MainActivity : Activity() {
     }
 
     // ========================================================================
+    // Master Toggle
+    // ========================================================================
+
+    private fun setupMasterToggle() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val enabled = prefs.getBoolean(KEY_ENABLED, false)
+        masterToggle.isChecked = enabled
+
+        masterToggle.setOnCheckedChangeListener { _, isChecked ->
+            prefs.edit().putBoolean(KEY_ENABLED, isChecked).apply()
+            if (isChecked) {
+                requestNotificationPermissionIfNeeded()
+                NeuralBridgeAccessibilityService.instance?.enable()
+            } else {
+                NeuralBridgeAccessibilityService.instance?.disable()
+            }
+            updateServiceStatus()
+            updateAllPermissionStatus()
+        }
+    }
+
+    // ========================================================================
     // Status Tab
     // ========================================================================
 
     private fun updateServiceStatus() {
+        val enabled = masterToggle.isChecked
         val service = NeuralBridgeAccessibilityService.instance
         val isRunning = service != null
-        val connectionCount = service?.getConnectionCount() ?: 0
+        val connectionCount = if (enabled) service?.getConnectionCount() ?: 0 else 0
 
         // Header
-        if (isRunning && isAccessibilityServiceEnabled()) {
+        if (!enabled) {
+            statusDot.setBackgroundColor(getColor(R.color.status_inactive))
+            overallStatusText.text = "DISABLED"
+        } else if (isRunning && isAccessibilityServiceEnabled()) {
             statusDot.setBackgroundResource(R.drawable.bg_status_dot)
             overallStatusText.text = if (connectionCount > 0) "ALL SYSTEMS READY" else "WAITING FOR CONNECTION"
         } else {
@@ -220,11 +255,18 @@ class MainActivity : Activity() {
         }
 
         // Connection hero card
-        if (connectionCount > 0) {
+        if (!enabled) {
+            connectionStatusIcon.text = "⬡"
+            connectionStatusText.text = "NEURALBRIDGE IS OFF"
+            connectionStatusText.setTextColor(getColor(R.color.text_medium_emphasis))
+            connectionDetailText.text = "Toggle to enable"
+        } else if (connectionCount > 0) {
+            connectionStatusIcon.text = "📡"
             connectionStatusText.text = "CONNECTED"
             connectionStatusText.setTextColor(getColor(R.color.success))
             connectionDetailText.text = "$connectionCount agent${if (connectionCount > 1) "s" else ""} connected"
         } else {
+            connectionStatusIcon.text = "📡"
             connectionStatusText.text = "WAITING FOR CONNECTION"
             connectionStatusText.setTextColor(getColor(R.color.text_medium_emphasis))
             connectionDetailText.text = "Port 38472"

@@ -16,7 +16,7 @@
  * - 0x03: Event (Companion app → MCP server, unsolicited)
  */
 
-use anyhow::{Result, Context, bail};
+use anyhow::{bail, Context, Result};
 use bytes::{Buf, BytesMut};
 use prost::Message;
 use tracing::{debug, trace};
@@ -86,12 +86,18 @@ impl MessageHeader {
         let magic = u16::from_be_bytes([buf[0], buf[1]]);
         if magic != MAGIC {
             // Log hex dump of buffer for debugging
-            let hex_dump: String = buf.iter().take(std::cmp::min(32, buf.len()))
+            let hex_dump: String = buf
+                .iter()
+                .take(std::cmp::min(32, buf.len()))
                 .map(|b| format!("{:02X}", b))
                 .collect::<Vec<String>>()
                 .join(" ");
-            bail!("Invalid magic bytes: 0x{:04X}, expected 0x{:04X}. Buffer hex (first 32 bytes): {}",
-                magic, MAGIC, hex_dump);
+            bail!(
+                "Invalid magic bytes: 0x{:04X}, expected 0x{:04X}. Buffer hex (first 32 bytes): {}",
+                magic,
+                MAGIC,
+                hex_dump
+            );
         }
 
         // Parse message type
@@ -102,7 +108,11 @@ impl MessageHeader {
 
         // Validate payload length
         if payload_length > Self::MAX_PAYLOAD_SIZE {
-            bail!("Payload length {} exceeds maximum {}", payload_length, Self::MAX_PAYLOAD_SIZE);
+            bail!(
+                "Payload length {} exceeds maximum {}",
+                payload_length,
+                Self::MAX_PAYLOAD_SIZE
+            );
         }
 
         Ok(Self {
@@ -116,11 +126,16 @@ impl MessageHeader {
 pub fn encode_message<M: Message>(message_type: MessageType, message: &M) -> Result<Vec<u8>> {
     // Encode protobuf message
     let mut payload = Vec::new();
-    message.encode(&mut payload)
+    message
+        .encode(&mut payload)
         .context("Failed to encode protobuf message")?;
 
     let payload_len = payload.len() as u32;
-    trace!("Encoding message: type={:?}, payload_len={}", message_type, payload_len);
+    trace!(
+        "Encoding message: type={:?}, payload_len={}",
+        message_type,
+        payload_len
+    );
 
     // Create header
     let header = MessageHeader::new(message_type, payload_len);
@@ -140,22 +155,28 @@ pub fn encode_message<M: Message>(message_type: MessageType, message: &M) -> Res
 pub fn decode_message<M: Message + Default>(buf: &[u8]) -> Result<(MessageHeader, M)> {
     // Decode header
     let header = MessageHeader::decode(buf)?;
-    trace!("Decoded header: type={:?}, payload_len={}", header.message_type, header.payload_length);
+    trace!(
+        "Decoded header: type={:?}, payload_len={}",
+        header.message_type,
+        header.payload_length
+    );
 
     // Extract payload
     let payload_start = MessageHeader::SIZE;
     let payload_end = payload_start + header.payload_length as usize;
 
     if buf.len() < payload_end {
-        bail!("Buffer too short for payload: {} bytes available, {} expected",
-            buf.len() - payload_start, header.payload_length);
+        bail!(
+            "Buffer too short for payload: {} bytes available, {} expected",
+            buf.len() - payload_start,
+            header.payload_length
+        );
     }
 
     let payload = &buf[payload_start..payload_end];
 
     // Decode protobuf message
-    let message = M::decode(payload)
-        .context("Failed to decode protobuf message")?;
+    let message = M::decode(payload).context("Failed to decode protobuf message")?;
 
     debug!("Decoded message successfully");
     Ok((header, message))
@@ -193,14 +214,20 @@ impl MessageFramer {
         for i in 1..scan_limit - 1 {
             let magic = u16::from_be_bytes([self.buffer[i], self.buffer[i + 1]]);
             if magic == MAGIC {
-                debug!("Found magic bytes at offset {}, discarding {} corrupted bytes", i, i);
+                debug!(
+                    "Found magic bytes at offset {}, discarding {} corrupted bytes",
+                    i, i
+                );
                 // Discard corrupted data before the magic
                 self.buffer.advance(i);
                 return true;
             }
         }
 
-        debug!("Buffer realignment failed: no magic bytes found in first {} bytes", scan_limit);
+        debug!(
+            "Buffer realignment failed: no magic bytes found in first {} bytes",
+            scan_limit
+        );
         false
     }
 
@@ -219,7 +246,10 @@ impl MessageFramer {
             Ok(h) => h,
             Err(e) => {
                 // Header decode failed - try buffer realignment
-                debug!("Header decode failed: {}. Attempting buffer realignment...", e);
+                debug!(
+                    "Header decode failed: {}. Attempting buffer realignment...",
+                    e
+                );
                 if self.try_realign_buffer() {
                     // Retry header decode after realignment
                     if self.buffer.len() < MessageHeader::SIZE {
@@ -236,7 +266,11 @@ impl MessageFramer {
         // Check if full message is available
         let total_size = MessageHeader::SIZE + header.payload_length as usize;
         if self.buffer.len() < total_size {
-            trace!("Incomplete message: have {} bytes, need {}", self.buffer.len(), total_size);
+            trace!(
+                "Incomplete message: have {} bytes, need {}",
+                self.buffer.len(),
+                total_size
+            );
             return Ok(None);
         }
 
@@ -244,8 +278,10 @@ impl MessageFramer {
         let message_bytes = self.buffer.split_to(total_size);
         let payload = message_bytes[MessageHeader::SIZE..].to_vec();
 
-        debug!("Extracted complete message: type={:?}, payload_len={}",
-            header.message_type, header.payload_length);
+        debug!(
+            "Extracted complete message: type={:?}, payload_len={}",
+            header.message_type, header.payload_length
+        );
 
         Ok(Some((header, payload)))
     }

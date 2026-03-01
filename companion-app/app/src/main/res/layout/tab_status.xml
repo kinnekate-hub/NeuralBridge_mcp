@@ -46,6 +46,16 @@
                 android:textAppearance="@style/TextAppearance.NeuralBridge.BodySmall"
                 android:textColor="@color/text_medium_emphasis" />
 
+            <Switch
+                android:id="@+id/masterToggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/spacing_medium"
+                android:checked="false"
+                android:text="ENABLE"
+                android:textAppearance="@style/TextAppearance.NeuralBridge.LabelMedium"
+                android:textStyle="bold" />
+
         </LinearLayout>
 
         <!-- 3-Up Status Grid -->

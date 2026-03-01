@@ -13,7 +13,7 @@
  * - `text="Login"[visible=true]` - Match visible elements with text "Login"
  */
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use tracing::debug;
 
 use crate::protocol::pb::Selector;

@@ -7,6 +7,6 @@
 pub mod protocol;
 
 // Re-export commonly used types for convenience
-pub use protocol::pb;
-pub use protocol::connection;
 pub use protocol::codec;
+pub use protocol::connection;
+pub use protocol::pb;

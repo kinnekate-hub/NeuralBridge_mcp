@@ -4,6 +4,7 @@ import android.util.Log
 import com.neuralbridge.companion.service.NeuralBridgeAccessibilityService
 import kotlinx.coroutines.*
 import java.io.IOException
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
@@ -50,10 +51,13 @@ class TcpServer(
 
         try {
             // Create unbound socket, set reuseAddress BEFORE binding
+            // Bind to loopback only (127.0.0.1) — prevents LAN-reachable exposure.
+            // ADB port-forwarding (tcp:38472 tcp:38472) is the intended transport.
+            val loopback = InetAddress.getLoopbackAddress()
             serverSocket = ServerSocket().apply {
                 reuseAddress = true  // Must be set before bind()
                 soTimeout = 0 // No timeout for accept()
-                bind(java.net.InetSocketAddress(port), 50) // Bind with backlog of 50
+                bind(java.net.InetSocketAddress(loopback, port), 50)
             }
 
             Log.i(TAG, "TCP server listening on port $port")

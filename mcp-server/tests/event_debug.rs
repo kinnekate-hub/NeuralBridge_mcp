@@ -5,15 +5,14 @@
 
 use anyhow::Result;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use uuid::Uuid;
 
+use neuralbridge_mcp::protocol::codec::{encode_message, MessageFramer, MessageType};
 use neuralbridge_mcp::protocol::pb::{
-    Request, Response, Event, request::Command,
-    EnableEventsRequest, EventType,
+    request::Command, EnableEventsRequest, Event, EventType, Request, Response,
 };
-use neuralbridge_mcp::protocol::codec::{MessageType, encode_message, MessageFramer};
 use prost::Message;
 
 #[tokio::test]
@@ -52,8 +51,13 @@ async fn debug_event_streaming() -> Result<()> {
     // Drain any pending events
     println!("4. Draining pending events...");
     let mut drained = 0;
-    while let Ok(Some(evt)) = read_event_timeout(&mut stream, &mut framer, Duration::from_millis(200)).await {
-        println!("   - Drained event: type={}, id={}", evt.event_type, evt.event_id);
+    while let Ok(Some(evt)) =
+        read_event_timeout(&mut stream, &mut framer, Duration::from_millis(200)).await
+    {
+        println!(
+            "   - Drained event: type={}, id={}",
+            evt.event_type, evt.event_id
+        );
         drained += 1;
     }
     println!("   ✓ Drained {} events\n", drained);
@@ -62,16 +66,21 @@ async fn debug_event_streaming() -> Result<()> {
     println!("5. Triggering UI change (press HOME button)...");
     let home_req = Request {
         request_id: Uuid::new_v4().to_string(),
-        command: Some(Command::GlobalAction(neuralbridge_mcp::protocol::pb::GlobalActionRequest {
-            action: neuralbridge_mcp::protocol::pb::GlobalAction::GlobalHome as i32,
-        })),
+        command: Some(Command::GlobalAction(
+            neuralbridge_mcp::protocol::pb::GlobalActionRequest {
+                action: neuralbridge_mcp::protocol::pb::GlobalAction::GlobalHome as i32,
+            },
+        )),
     };
     let msg = encode_message(MessageType::Request, &home_req)?;
     stream.write_all(&msg).await?;
 
     // Read home response
     let home_resp = read_response(&mut stream, &mut framer).await?;
-    println!("   ✓ Home action completed: success={}\n", home_resp.success);
+    println!(
+        "   ✓ Home action completed: success={}\n",
+        home_resp.success
+    );
 
     // Try to read events (check what's in the buffer)
     println!("6. Reading events from stream (up to 5 seconds)...");
@@ -84,27 +93,32 @@ async fn debug_event_streaming() -> Result<()> {
         }
 
         match read_message_timeout(&mut stream, &mut framer, Duration::from_millis(500)).await {
-            Ok(Some((header, payload))) => {
-                match header.message_type {
-                    MessageType::Event => {
-                        let event = Event::decode(&payload[..])?;
-                        println!("   ✓ Received EVENT: type={} ({}), id={}, timestamp={}",
-                                 event.event_type,
-                                 event_type_name(event.event_type),
-                                 event.event_id,
-                                 event.timestamp);
-                        event_count += 1;
-                    }
-                    MessageType::Response => {
-                        let response = Response::decode(&payload[..])?;
-                        println!("   - Received RESPONSE: request_id={}, success={}",
-                                 response.request_id, response.success);
-                    }
-                    _ => {
-                        println!("   - Received unknown message type: {:?}", header.message_type);
-                    }
+            Ok(Some((header, payload))) => match header.message_type {
+                MessageType::Event => {
+                    let event = Event::decode(&payload[..])?;
+                    println!(
+                        "   ✓ Received EVENT: type={} ({}), id={}, timestamp={}",
+                        event.event_type,
+                        event_type_name(event.event_type),
+                        event.event_id,
+                        event.timestamp
+                    );
+                    event_count += 1;
                 }
-            }
+                MessageType::Response => {
+                    let response = Response::decode(&payload[..])?;
+                    println!(
+                        "   - Received RESPONSE: request_id={}, success={}",
+                        response.request_id, response.success
+                    );
+                }
+                _ => {
+                    println!(
+                        "   - Received unknown message type: {:?}",
+                        header.message_type
+                    );
+                }
+            },
             Ok(None) => {
                 println!("   - Timeout (500ms), no message");
             }
@@ -147,7 +161,7 @@ async fn read_response(stream: &mut TcpStream, framer: &mut MessageFramer) -> Re
 async fn read_event_timeout(
     stream: &mut TcpStream,
     framer: &mut MessageFramer,
-    timeout: Duration
+    timeout: Duration,
 ) -> Result<Option<Event>> {
     match tokio::time::timeout(timeout, read_event(stream, framer)).await {
         Ok(Ok(evt)) => Ok(Some(evt)),
@@ -176,7 +190,7 @@ async fn read_event(stream: &mut TcpStream, framer: &mut MessageFramer) -> Resul
 async fn read_message_timeout(
     stream: &mut TcpStream,
     framer: &mut MessageFramer,
-    timeout: Duration
+    timeout: Duration,
 ) -> Result<Option<(neuralbridge_mcp::protocol::codec::MessageHeader, Vec<u8>)>> {
     match tokio::time::timeout(timeout, read_message(stream, framer)).await {
         Ok(Ok(msg)) => Ok(Some(msg)),
@@ -187,7 +201,7 @@ async fn read_message_timeout(
 
 async fn read_message(
     stream: &mut TcpStream,
-    framer: &mut MessageFramer
+    framer: &mut MessageFramer,
 ) -> Result<(neuralbridge_mcp::protocol::codec::MessageHeader, Vec<u8>)> {
     loop {
         if let Some(msg) = framer.try_extract_message()? {

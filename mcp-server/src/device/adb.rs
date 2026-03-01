@@ -5,11 +5,11 @@
  * Handles privileged operations that must be routed through ADB.
  */
 
-use anyhow::{Result, Context, bail};
+use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
-use tracing::{debug, warn, trace};
+use tracing::{debug, trace, warn};
 
 /// ADB command executor
 pub struct AdbExecutor {
@@ -39,10 +39,7 @@ impl AdbExecutor {
         }
 
         // Try PATH
-        if let Ok(output) = std::process::Command::new("which")
-            .arg("adb")
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new("which").arg("adb").output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout);
                 let path = path.trim();
@@ -83,16 +80,16 @@ impl AdbExecutor {
 
     /// Check if ADB is installed and accessible
     pub async fn check_installed(&self) -> Result<bool> {
-        let result = Command::new(&self.adb_path)
-            .arg("version")
-            .output()
-            .await;
+        let result = Command::new(&self.adb_path).arg("version").output().await;
 
         match result {
             Ok(output) => {
                 if output.status.success() {
                     let version = String::from_utf8_lossy(&output.stdout);
-                    debug!("ADB version: {}", version.lines().next().unwrap_or("unknown"));
+                    debug!(
+                        "ADB version: {}",
+                        version.lines().next().unwrap_or("unknown")
+                    );
                     Ok(true)
                 } else {
                     Ok(false)
@@ -128,8 +125,7 @@ impl AdbExecutor {
             bail!("ADB command failed: {}", stderr);
         }
 
-        let stdout = String::from_utf8(output.stdout)
-            .context("ADB output is not valid UTF-8")?;
+        let stdout = String::from_utf8(output.stdout).context("ADB output is not valid UTF-8")?;
 
         trace!("ADB output: {} bytes", stdout.len());
         Ok(stdout)
@@ -165,7 +161,9 @@ impl AdbExecutor {
         if name.is_empty() || name.len() > 255 {
             bail!("Invalid package name length");
         }
-        let valid = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
+        let valid = name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
         if !valid || !name.contains('.') {
             bail!("Invalid package name format: {}", name);
         }
@@ -179,10 +177,14 @@ impl AdbExecutor {
         }
         // Android permissions must start with a domain (e.g., android.permission.CAMERA)
         if !permission.contains('.') {
-            bail!("Invalid permission format: must contain domain (e.g., android.permission.CAMERA)");
+            bail!(
+                "Invalid permission format: must contain domain (e.g., android.permission.CAMERA)"
+            );
         }
         // Only allow alphanumeric, dots, and underscores
-        let valid = permission.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
+        let valid = permission
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
         if !valid {
             bail!("Invalid permission format: contains illegal characters");
         }
@@ -234,11 +236,19 @@ impl AdbExecutor {
     ///
     /// # Arguments
     /// * `keep_data` - If true, passes `-k` flag to preserve app data/cache after removal
-    pub async fn uninstall_package(&self, device_id: &str, package_name: &str, keep_data: bool) -> Result<()> {
+    pub async fn uninstall_package(
+        &self,
+        device_id: &str,
+        package_name: &str,
+        keep_data: bool,
+    ) -> Result<()> {
         // Validate package name before proceeding
         Self::validate_package_name(package_name)?;
 
-        debug!("Uninstalling package {} from device {} (keep_data={})", package_name, device_id, keep_data);
+        debug!(
+            "Uninstalling package {} from device {} (keep_data={})",
+            package_name, device_id, keep_data
+        );
 
         let mut args = vec!["-s", device_id, "uninstall"];
         if keep_data {
@@ -261,12 +271,14 @@ impl AdbExecutor {
         // Validate package name before proceeding
         Self::validate_package_name(package_name)?;
 
-        debug!("Clearing data for package {} on device {}", package_name, device_id);
+        debug!(
+            "Clearing data for package {} on device {}",
+            package_name, device_id
+        );
 
-        let output = self.execute_command(&[
-            "-s", device_id,
-            "shell", "pm", "clear", package_name
-        ]).await?;
+        let output = self
+            .execute_command(&["-s", device_id, "shell", "pm", "clear", package_name])
+            .await?;
 
         if output.contains("Success") {
             debug!("App data cleared successfully");
@@ -281,29 +293,44 @@ impl AdbExecutor {
         // Validate package name before proceeding
         Self::validate_package_name(package_name)?;
 
-        debug!("Force-stopping package {} on device {}", package_name, device_id);
+        debug!(
+            "Force-stopping package {} on device {}",
+            package_name, device_id
+        );
 
-        self.execute_command(&[
-            "-s", device_id,
-            "shell", "am", "force-stop", package_name
-        ]).await?;
+        self.execute_command(&["-s", device_id, "shell", "am", "force-stop", package_name])
+            .await?;
 
         debug!("App force-stopped successfully");
         Ok(())
     }
 
     /// Grant runtime permission to app
-    pub async fn grant_permission(&self, device_id: &str, package_name: &str, permission: &str) -> Result<()> {
+    pub async fn grant_permission(
+        &self,
+        device_id: &str,
+        package_name: &str,
+        permission: &str,
+    ) -> Result<()> {
         // Validate package name and permission before proceeding
         Self::validate_package_name(package_name)?;
         Self::validate_permission(permission)?;
 
-        debug!("Granting permission {} to {} on device {}", permission, package_name, device_id);
+        debug!(
+            "Granting permission {} to {} on device {}",
+            permission, package_name, device_id
+        );
 
         self.execute_command(&[
-            "-s", device_id,
-            "shell", "pm", "grant", package_name, permission
-        ]).await?;
+            "-s",
+            device_id,
+            "shell",
+            "pm",
+            "grant",
+            package_name,
+            permission,
+        ])
+        .await?;
 
         debug!("Permission granted successfully");
         Ok(())
@@ -313,17 +340,31 @@ impl AdbExecutor {
     ///
     /// Only works for runtime (dangerous) permissions. Install-time permissions
     /// cannot be revoked and will return an error.
-    pub async fn revoke_permission(&self, device_id: &str, package_name: &str, permission: &str) -> Result<()> {
+    pub async fn revoke_permission(
+        &self,
+        device_id: &str,
+        package_name: &str,
+        permission: &str,
+    ) -> Result<()> {
         // Validate package name and permission before proceeding
         Self::validate_package_name(package_name)?;
         Self::validate_permission(permission)?;
 
-        debug!("Revoking permission {} from {} on device {}", permission, package_name, device_id);
+        debug!(
+            "Revoking permission {} from {} on device {}",
+            permission, package_name, device_id
+        );
 
         self.execute_command(&[
-            "-s", device_id,
-            "shell", "pm", "revoke", package_name, permission
-        ]).await?;
+            "-s",
+            device_id,
+            "shell",
+            "pm",
+            "revoke",
+            package_name,
+            permission,
+        ])
+        .await?;
 
         debug!("Permission revoked successfully");
         Ok(())
@@ -335,7 +376,9 @@ impl AdbExecutor {
 
         // Execute: adb exec-out screencap -p
         // Note: Using exec-out to get raw binary data without shell encoding
-        let screenshot_data = self.execute_shell_stream(device_id, &["screencap", "-p"]).await?;
+        let screenshot_data = self
+            .execute_shell_stream(device_id, &["screencap", "-p"])
+            .await?;
 
         debug!("Screenshot captured: {} bytes", screenshot_data.len());
         Ok(screenshot_data)
@@ -345,10 +388,9 @@ impl AdbExecutor {
     pub async fn get_clipboard(&self, device_id: &str) -> Result<String> {
         debug!("Getting clipboard content from device {}", device_id);
 
-        let output = self.execute_command(&[
-            "-s", device_id,
-            "shell", "cmd", "clipboard", "get-text"
-        ]).await?;
+        let output = self
+            .execute_command(&["-s", device_id, "shell", "cmd", "clipboard", "get-text"])
+            .await?;
 
         Ok(output.trim().to_string())
     }
@@ -363,11 +405,8 @@ impl AdbExecutor {
         let escaped = format!("'{}'", text.replace('\'', r"'\''"));
         let shell_cmd = format!("cmd clipboard set-text {}", escaped);
 
-        self.execute_command(&[
-            "-s", device_id,
-            "shell",
-            &shell_cmd,
-        ]).await?;
+        self.execute_command(&["-s", device_id, "shell", &shell_cmd])
+            .await?;
 
         Ok(())
     }
@@ -383,12 +422,27 @@ impl AdbExecutor {
     ) -> Result<String> {
         debug!("Capturing logcat from device {}", device_id);
 
+        // Validate level against the logcat allowlist (V, D, I, W, E, F, S)
+        let valid_levels = ["V", "D", "I", "W", "E", "F", "S"];
+        let normalized_level = level.to_uppercase();
+        if !valid_levels.contains(&normalized_level.as_str()) {
+            bail!(
+                "Invalid log level '{}'. Must be one of: V, D, I, W, E, F, S",
+                level
+            );
+        }
+        let level = normalized_level.as_str();
+
+        // Validate package name if provided
+        if let Some(pkg) = package {
+            Self::validate_package_name(pkg)?;
+        }
+
         let mut output = if let Some(pkg) = package {
             // Get PID for the package
-            let pid_output = self.execute_command(&[
-                "-s", device_id,
-                "shell", "pidof", pkg
-            ]).await;
+            let pid_output = self
+                .execute_command(&["-s", device_id, "shell", "pidof", pkg])
+                .await;
 
             match pid_output {
                 Ok(pid_str) => {
@@ -399,11 +453,16 @@ impl AdbExecutor {
                     }
                     // Get logcat for this PID
                     self.execute_command(&[
-                        "-s", device_id,
-                        "logcat", "-d", &format!("--pid={}", pid),
-                        "-t", &lines.to_string(),
-                        &format!("*:{}", level)
-                    ]).await?
+                        "-s",
+                        device_id,
+                        "logcat",
+                        "-d",
+                        &format!("--pid={}", pid),
+                        "-t",
+                        &lines.to_string(),
+                        &format!("*:{}", level),
+                    ])
+                    .await?
                 }
                 Err(_) => {
                     // pidof failed, package not running
@@ -413,11 +472,15 @@ impl AdbExecutor {
         } else {
             // No package filter, get all logs
             self.execute_command(&[
-                "-s", device_id,
-                "logcat", "-d",
-                "-t", &lines.to_string(),
-                &format!("*:{}", level)
-            ]).await?
+                "-s",
+                device_id,
+                "logcat",
+                "-d",
+                "-t",
+                &lines.to_string(),
+                &format!("*:{}", level),
+            ])
+            .await?
         };
 
         // If crash_only, filter for FATAL EXCEPTION blocks
@@ -451,13 +514,16 @@ impl AdbExecutor {
     ///
     /// Returns list of package names
     pub async fn list_packages(&self, device_id: &str, filter: &str) -> Result<Vec<String>> {
-        debug!("Listing packages on device {} (filter: {})", device_id, filter);
+        debug!(
+            "Listing packages on device {} (filter: {})",
+            device_id, filter
+        );
 
         let mut args = vec!["-s", device_id, "shell", "pm", "list", "packages"];
         match filter {
             "third_party" => args.push("-3"),
-            "system"      => args.push("-s"),
-            _             => {} // "all" = no extra flag
+            "system" => args.push("-s"),
+            _ => {} // "all" = no extra flag
         }
 
         let output = self.execute_command(&args).await?;
@@ -478,31 +544,46 @@ impl AdbExecutor {
         debug!("Getting device info from device {}", device_id);
 
         // Get various device properties
-        let manufacturer = self.execute_command(&[
-            "-s", device_id,
-            "shell", "getprop", "ro.product.manufacturer"
-        ]).await?.trim().to_string();
+        let manufacturer = self
+            .execute_command(&[
+                "-s",
+                device_id,
+                "shell",
+                "getprop",
+                "ro.product.manufacturer",
+            ])
+            .await?
+            .trim()
+            .to_string();
 
-        let model = self.execute_command(&[
-            "-s", device_id,
-            "shell", "getprop", "ro.product.model"
-        ]).await?.trim().to_string();
+        let model = self
+            .execute_command(&["-s", device_id, "shell", "getprop", "ro.product.model"])
+            .await?
+            .trim()
+            .to_string();
 
-        let android_version = self.execute_command(&[
-            "-s", device_id,
-            "shell", "getprop", "ro.build.version.release"
-        ]).await?.trim().to_string();
+        let android_version = self
+            .execute_command(&[
+                "-s",
+                device_id,
+                "shell",
+                "getprop",
+                "ro.build.version.release",
+            ])
+            .await?
+            .trim()
+            .to_string();
 
-        let sdk_level = self.execute_command(&[
-            "-s", device_id,
-            "shell", "getprop", "ro.build.version.sdk"
-        ]).await?.trim().to_string();
+        let sdk_level = self
+            .execute_command(&["-s", device_id, "shell", "getprop", "ro.build.version.sdk"])
+            .await?
+            .trim()
+            .to_string();
 
         // Get screen dimensions
-        let wm_size = self.execute_command(&[
-            "-s", device_id,
-            "shell", "wm", "size"
-        ]).await?;
+        let wm_size = self
+            .execute_command(&["-s", device_id, "shell", "wm", "size"])
+            .await?;
 
         // Parse "Physical size: 1080x2340" or "Override size: 1080x2340"
         let dimensions = wm_size
@@ -513,10 +594,9 @@ impl AdbExecutor {
             .unwrap_or_else(|| "unknown".to_string());
 
         // Get screen density
-        let wm_density = self.execute_command(&[
-            "-s", device_id,
-            "shell", "wm", "density"
-        ]).await?;
+        let wm_density = self
+            .execute_command(&["-s", device_id, "shell", "wm", "density"])
+            .await?;
 
         // Parse "Physical density: 420" or "Override density: 420"
         let density = wm_density
@@ -592,7 +672,9 @@ mod tests {
     #[test]
     fn test_validate_permission_valid() {
         assert!(AdbExecutor::validate_permission("android.permission.CAMERA").is_ok());
-        assert!(AdbExecutor::validate_permission("android.permission.READ_EXTERNAL_STORAGE").is_ok());
+        assert!(
+            AdbExecutor::validate_permission("android.permission.READ_EXTERNAL_STORAGE").is_ok()
+        );
         assert!(AdbExecutor::validate_permission("com.example.permission.CUSTOM").is_ok());
     }
 
@@ -646,9 +728,7 @@ mod tests {
     fn test_clipboard_shell_escaping() {
         // Verify the single-quote escape idiom handles dangerous characters safely.
         // set_clipboard now wraps text in single quotes and escapes embedded single quotes.
-        let escape = |text: &str| -> String {
-            format!("'{}'", text.replace('\'', r"'\''"))
-        };
+        let escape = |text: &str| -> String { format!("'{}'", text.replace('\'', r"'\''")) };
 
         // Basic text is wrapped in single quotes
         assert_eq!(escape("Hello World"), "'Hello World'");

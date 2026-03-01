@@ -5,17 +5,17 @@
  * Handles connection establishment, message sending/receiving, and reconnection logic.
  */
 
-use anyhow::{Result, Context, bail};
+use anyhow::{bail, Context, Result};
 use prost::Message;
-use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, mpsc};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, debug, warn};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::{mpsc, Mutex};
+use tracing::{debug, info, warn};
 
-use super::codec::{MessageType, MessageFramer, encode_message};
-use super::pb::{Request, Response, Event};
+use super::codec::{encode_message, MessageFramer, MessageType};
+use super::pb::{Event, Request, Response};
 
 /// TCP port where companion app listens
 pub const COMPANION_PORT: u16 = 38472;
@@ -28,8 +28,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Retry configuration
 const MAX_RETRIES: u32 = 5;
-const INITIAL_BACKOFF_MS: u64 = 250;  // Reduced from 500ms for faster initial retry
-const MAX_BACKOFF_MS: u64 = 4000;     // Reduced from 8000ms for faster reconnection
+const INITIAL_BACKOFF_MS: u64 = 250; // Reduced from 500ms for faster initial retry
+const MAX_BACKOFF_MS: u64 = 4000; // Reduced from 8000ms for faster reconnection
 
 /// Device connection handle
 #[derive(Clone)]
@@ -40,25 +40,29 @@ pub struct DeviceConnection {
 struct ConnectionInner {
     stream: TcpStream,
     framer: MessageFramer,
-    event_tx: Option<mpsc::Sender<Event>>,  // Event channel sender (bounded)
+    event_tx: Option<mpsc::Sender<Event>>, // Event channel sender (bounded)
     event_rx: Option<mpsc::Receiver<Event>>, // Event channel receiver (bounded, taken once)
 }
 
 impl DeviceConnection {
     /// Internal connection attempt (single try, no retries)
     async fn try_connect() -> Result<Self> {
-        info!("Connecting to companion app on localhost:{}", COMPANION_PORT);
+        info!(
+            "Connecting to companion app on localhost:{}",
+            COMPANION_PORT
+        );
 
         let stream = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            TcpStream::connect(("localhost", COMPANION_PORT))
+            TcpStream::connect(("localhost", COMPANION_PORT)),
         )
         .await
         .context("Connection timeout")?
         .context("Failed to connect to companion app")?;
 
         // Set TCP_NODELAY for low latency
-        stream.set_nodelay(true)
+        stream
+            .set_nodelay(true)
             .context("Failed to set TCP_NODELAY")?;
 
         info!("Connected to companion app");
@@ -113,10 +117,8 @@ impl DeviceConnection {
 
                     if attempt < MAX_RETRIES {
                         // Calculate backoff delay (exponential with cap)
-                        let backoff_ms = std::cmp::min(
-                            INITIAL_BACKOFF_MS * 2_u64.pow(attempt),
-                            MAX_BACKOFF_MS
-                        );
+                        let backoff_ms =
+                            std::cmp::min(INITIAL_BACKOFF_MS * 2_u64.pow(attempt), MAX_BACKOFF_MS);
 
                         warn!(
                             "Connection attempt {} failed (transient error), retrying in {}ms",
@@ -131,15 +133,14 @@ impl DeviceConnection {
         }
 
         // All retries exhausted
-        Err(last_error.unwrap())
-            .context(format!(
-                "Failed to connect after {} attempts. Check that:\n  \
+        Err(last_error.unwrap()).context(format!(
+            "Failed to connect after {} attempts. Check that:\n  \
                  1. Companion app is running on device\n  \
                  2. ADB port forwarding is active: adb forward tcp:{} tcp:{}",
-                MAX_RETRIES + 1,
-                COMPANION_PORT,
-                COMPANION_PORT
-            ))
+            MAX_RETRIES + 1,
+            COMPANION_PORT,
+            COMPANION_PORT
+        ))
     }
 
     /// Establish connection to companion app
@@ -167,25 +168,30 @@ impl DeviceConnection {
 
         // Send to companion app
         let mut inner = self.inner.lock().await;
-        inner.stream.write_all(&message_bytes).await
+        inner
+            .stream
+            .write_all(&message_bytes)
+            .await
             .context("Failed to send request")?;
-        inner.stream.flush().await
+        inner
+            .stream
+            .flush()
+            .await
             .context("Failed to flush request")?;
 
         debug!("Request sent, waiting for response...");
 
         // Read response with timeout
-        let response = tokio::time::timeout(
-            READ_TIMEOUT,
-            Self::read_response_inner(&mut inner)
-        )
-        .await
-        .context("Response timeout")??;
+        let response = tokio::time::timeout(READ_TIMEOUT, Self::read_response_inner(&mut inner))
+            .await
+            .context("Response timeout")??;
 
         // Validate request ID matches
         if response.request_id != request_id {
-            warn!("Response request_id mismatch: expected {}, got {}",
-                request_id, response.request_id);
+            warn!(
+                "Response request_id mismatch: expected {}, got {}",
+                request_id, response.request_id
+            );
         }
 
         debug!("Received response: success={}", response.success);
@@ -210,7 +216,10 @@ impl DeviceConnection {
                             // Decode and send event to channel
                             match Event::decode(&payload[..]) {
                                 Ok(event) => {
-                                    debug!("Received event: type={:?}, id={}", event.event_type, event.event_id);
+                                    debug!(
+                                        "Received event: type={:?}, id={}",
+                                        event.event_type, event.event_id
+                                    );
                                     // Send to event channel if available
                                     if let Some(ref tx) = inner.event_tx {
                                         if let Err(e) = tx.try_send(event) {
@@ -244,7 +253,10 @@ impl DeviceConnection {
 
             // Need more data
             let mut buf = vec![0u8; 4096];
-            let n = inner.stream.read(&mut buf).await
+            let n = inner
+                .stream
+                .read(&mut buf)
+                .await
                 .context("Failed to read from connection")?;
 
             if n == 0 {
@@ -253,12 +265,18 @@ impl DeviceConnection {
 
             // Log first 32 bytes as hex for debugging
             if n > 0 {
-                let hex_preview: String = buf.iter().take(std::cmp::min(32, n))
+                let hex_preview: String = buf
+                    .iter()
+                    .take(std::cmp::min(32, n))
                     .map(|b| format!("{:02X}", b))
                     .collect::<Vec<String>>()
                     .join(" ");
-                debug!("Read {} bytes from connection. First {} bytes: {}",
-                    n, std::cmp::min(32, n), hex_preview);
+                debug!(
+                    "Read {} bytes from connection. First {} bytes: {}",
+                    n,
+                    std::cmp::min(32, n),
+                    hex_preview
+                );
             }
 
             inner.framer.add_data(&buf[..n]);
@@ -268,7 +286,10 @@ impl DeviceConnection {
     /// Close the connection
     pub async fn close(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        inner.stream.shutdown().await
+        inner
+            .stream
+            .shutdown()
+            .await
             .context("Failed to close connection")?;
         info!("Connection closed");
         Ok(())
@@ -283,15 +304,14 @@ impl DeviceConnection {
 
         // First: try peek to check for EOF or error
         let mut peek_buf = [0u8; 1];
-        match tokio::time::timeout(
-            Duration::from_millis(50),
-            inner.stream.peek(&mut peek_buf)
-        ).await {
+        match tokio::time::timeout(Duration::from_millis(50), inner.stream.peek(&mut peek_buf))
+            .await
+        {
             Ok(Ok(0)) => {
                 debug!("Connection closed (EOF)");
                 false
             }
-            Ok(Ok(_)) => true,  // Data available = definitely alive
+            Ok(Ok(_)) => true, // Data available = definitely alive
             Ok(Err(_)) => {
                 debug!("Connection health check failed (peek error)");
                 false
@@ -299,18 +319,17 @@ impl DeviceConnection {
             Err(_) => {
                 // Timeout on peek = no data waiting. Try a zero-byte write to verify
                 // the socket is still writable (detects broken pipe through ADB forwarding)
-                match tokio::time::timeout(
-                    Duration::from_millis(50),
-                    inner.stream.write_all(&[])
-                ).await {
-                    Ok(Ok(())) => true,  // Write succeeded = alive
+                match tokio::time::timeout(Duration::from_millis(50), inner.stream.write_all(&[]))
+                    .await
+                {
+                    Ok(Ok(())) => true, // Write succeeded = alive
                     Ok(Err(e)) => {
                         debug!("Connection health check failed (write error: {})", e);
                         false
                     }
                     Err(_) => {
                         debug!("Connection health check timed out on write");
-                        false  // If write times out, assume dead (conservative)
+                        false // If write times out, assume dead (conservative)
                     }
                 }
             }
@@ -362,7 +381,7 @@ mod tests {
         for (attempt, &expected_ms) in expected.iter().enumerate() {
             let backoff_ms = std::cmp::min(
                 INITIAL_BACKOFF_MS * 2_u64.pow(attempt as u32),
-                MAX_BACKOFF_MS
+                MAX_BACKOFF_MS,
             );
             assert_eq!(
                 backoff_ms, expected_ms,
@@ -376,10 +395,7 @@ mod tests {
     #[test]
     fn test_exponential_backoff_cap() {
         // At attempt 10, backoff should still be capped at 4000ms
-        let backoff_ms = std::cmp::min(
-            INITIAL_BACKOFF_MS * 2_u64.pow(10),
-            MAX_BACKOFF_MS
-        );
+        let backoff_ms = std::cmp::min(INITIAL_BACKOFF_MS * 2_u64.pow(10), MAX_BACKOFF_MS);
         assert_eq!(backoff_ms, MAX_BACKOFF_MS);
     }
 
@@ -441,19 +457,16 @@ mod tests {
     #[test]
     fn test_retry_backoff_sequence() {
         let expected_sequence = vec![
-            (0, 250),   // 250ms * 2^0 = 250ms
-            (1, 500),   // 250ms * 2^1 = 500ms
-            (2, 1000),  // 250ms * 2^2 = 1000ms
-            (3, 2000),  // 250ms * 2^3 = 2000ms
-            (4, 4000),  // 250ms * 2^4 = 4000ms (capped)
-            (5, 4000),  // 250ms * 2^5 = 8000ms → capped at 4000ms
+            (0, 250),  // 250ms * 2^0 = 250ms
+            (1, 500),  // 250ms * 2^1 = 500ms
+            (2, 1000), // 250ms * 2^2 = 1000ms
+            (3, 2000), // 250ms * 2^3 = 2000ms
+            (4, 4000), // 250ms * 2^4 = 4000ms (capped)
+            (5, 4000), // 250ms * 2^5 = 8000ms → capped at 4000ms
         ];
 
         for (attempt, expected_ms) in expected_sequence {
-            let backoff_ms = std::cmp::min(
-                INITIAL_BACKOFF_MS * 2_u64.pow(attempt),
-                MAX_BACKOFF_MS
-            );
+            let backoff_ms = std::cmp::min(INITIAL_BACKOFF_MS * 2_u64.pow(attempt), MAX_BACKOFF_MS);
             assert_eq!(
                 backoff_ms, expected_ms,
                 "Attempt {}: expected {}ms, got {}ms",

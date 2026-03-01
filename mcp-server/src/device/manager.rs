@@ -8,7 +8,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 use super::adb::AdbExecutor;
 
@@ -116,9 +116,7 @@ impl DeviceManager {
             cache.insert(device.device_id.clone(), device.clone());
         }
 
-        let device_ids: Vec<String> = devices.iter()
-            .map(|d| d.device_id.clone())
-            .collect();
+        let device_ids: Vec<String> = devices.iter().map(|d| d.device_id.clone()).collect();
 
         info!("Found {} device(s): {:?}", device_ids.len(), device_ids);
 
@@ -165,8 +163,8 @@ impl DeviceManager {
                 if let Some((key, value)) = part.split_once(':') {
                     match key {
                         "model" => model = Some(value.to_string()),
-                        "product" => {}, // Ignore for now
-                        "device" => {}, // Ignore for now
+                        "product" => {} // Ignore for now
+                        "device" => {}  // Ignore for now
                         _ => {}
                     }
                 }
@@ -190,10 +188,9 @@ impl DeviceManager {
         info!("Setting up port forwarding for device: {}", device_id);
 
         // Execute: adb -s <device_id> forward tcp:38472 tcp:38472
-        self.adb.execute_command(&[
-            "-s", device_id,
-            "forward", "tcp:38472", "tcp:38472"
-        ]).await?;
+        self.adb
+            .execute_command(&["-s", device_id, "forward", "tcp:38472", "tcp:38472"])
+            .await?;
 
         info!("Port forwarding established");
         Ok(())
@@ -204,10 +201,9 @@ impl DeviceManager {
         info!("Removing port forwarding for device: {}", device_id);
 
         // Execute: adb -s <device_id> forward --remove tcp:38472
-        self.adb.execute_command(&[
-            "-s", device_id,
-            "forward", "--remove", "tcp:38472"
-        ]).await?;
+        self.adb
+            .execute_command(&["-s", device_id, "forward", "--remove", "tcp:38472"])
+            .await?;
 
         Ok(())
     }
@@ -217,23 +213,42 @@ impl DeviceManager {
         debug!("Checking if companion app is installed on {}", device_id);
 
         // Execute: adb -s <device_id> shell pm list packages | grep com.neuralbridge
-        let output = self.adb.execute_command(&[
-            "-s", device_id,
-            "shell", "pm", "list", "packages", "com.neuralbridge.companion"
-        ]).await?;
+        let output = self
+            .adb
+            .execute_command(&[
+                "-s",
+                device_id,
+                "shell",
+                "pm",
+                "list",
+                "packages",
+                "com.neuralbridge.companion",
+            ])
+            .await?;
 
         Ok(output.contains("com.neuralbridge.companion"))
     }
 
     /// Check if AccessibilityService is enabled on device
     pub async fn check_accessibility_enabled(&self, device_id: &str) -> Result<bool> {
-        debug!("Checking if AccessibilityService is enabled on {}", device_id);
+        debug!(
+            "Checking if AccessibilityService is enabled on {}",
+            device_id
+        );
 
         // Execute: adb -s <device_id> shell settings get secure enabled_accessibility_services
-        let output = self.adb.execute_command(&[
-            "-s", device_id,
-            "shell", "settings", "get", "secure", "enabled_accessibility_services"
-        ]).await?;
+        let output = self
+            .adb
+            .execute_command(&[
+                "-s",
+                device_id,
+                "shell",
+                "settings",
+                "get",
+                "secure",
+                "enabled_accessibility_services",
+            ])
+            .await?;
 
         Ok(output.contains("com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService")
             || output.contains("com.neuralbridge.companion/com.neuralbridge.companion.service.NeuralBridgeAccessibilityService"))
@@ -259,13 +274,24 @@ impl DeviceManager {
 
     /// Check if NotificationListenerService is enabled on device
     pub async fn check_notification_listener_enabled(&self, device_id: &str) -> Result<bool> {
-        debug!("Checking if NotificationListenerService is enabled on {}", device_id);
+        debug!(
+            "Checking if NotificationListenerService is enabled on {}",
+            device_id
+        );
 
         // Execute: adb -s <device_id> shell settings get secure enabled_notification_listeners
-        let output = self.adb.execute_command(&[
-            "-s", device_id,
-            "shell", "settings", "get", "secure", "enabled_notification_listeners"
-        ]).await?;
+        let output = self
+            .adb
+            .execute_command(&[
+                "-s",
+                device_id,
+                "shell",
+                "settings",
+                "get",
+                "secure",
+                "enabled_notification_listeners",
+            ])
+            .await?;
 
         Ok(output.contains("com.neuralbridge.companion/com.neuralbridge.companion.notification.NotificationListener")
             || output.contains("com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"))
@@ -304,19 +330,31 @@ impl DeviceManager {
     pub async fn enable_accessibility_service(&self, device_id: &str) -> Result<()> {
         // Validate device_id to prevent command injection
         // ADB device IDs contain only: alphanumeric, dots, colons, dashes, underscores
-        if !device_id.chars().all(|c| c.is_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_') {
+        if !device_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_')
+        {
             anyhow::bail!("Invalid device_id format: contains unsafe characters");
         }
 
         info!("Enabling AccessibilityService on {}", device_id);
 
-        let service_component = "com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService";
+        let service_component =
+            "com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService";
 
         // Get current enabled services
-        let current = self.adb.execute_command(&[
-            "-s", device_id,
-            "shell", "settings", "get", "secure", "enabled_accessibility_services"
-        ]).await?;
+        let current = self
+            .adb
+            .execute_command(&[
+                "-s",
+                device_id,
+                "shell",
+                "settings",
+                "get",
+                "secure",
+                "enabled_accessibility_services",
+            ])
+            .await?;
 
         // Build new value (append if others exist)
         let new_value = if current.trim().is_empty() || current.trim() == "null" {
@@ -331,16 +369,32 @@ impl DeviceManager {
         };
 
         // Set enabled services
-        self.adb.execute_command(&[
-            "-s", device_id,
-            "shell", "settings", "put", "secure", "enabled_accessibility_services", &new_value
-        ]).await?;
+        self.adb
+            .execute_command(&[
+                "-s",
+                device_id,
+                "shell",
+                "settings",
+                "put",
+                "secure",
+                "enabled_accessibility_services",
+                &new_value,
+            ])
+            .await?;
 
         // Enable accessibility globally
-        self.adb.execute_command(&[
-            "-s", device_id,
-            "shell", "settings", "put", "secure", "accessibility_enabled", "1"
-        ]).await?;
+        self.adb
+            .execute_command(&[
+                "-s",
+                device_id,
+                "shell",
+                "settings",
+                "put",
+                "secure",
+                "accessibility_enabled",
+                "1",
+            ])
+            .await?;
 
         info!("AccessibilityService enabled successfully");
         Ok(())
@@ -353,7 +407,10 @@ impl DeviceManager {
     pub async fn enable_notification_listener(&self, device_id: &str) -> Result<()> {
         // Validate device_id to prevent command injection
         // ADB device IDs contain only: alphanumeric, dots, colons, dashes, underscores
-        if !device_id.chars().all(|c| c.is_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_') {
+        if !device_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_')
+        {
             anyhow::bail!("Invalid device_id format: contains unsafe characters");
         }
 
@@ -362,10 +419,17 @@ impl DeviceManager {
         let service_component = "com.neuralbridge.companion/com.neuralbridge.companion.notification.NotificationListener";
 
         // Use cmd notification allow_listener
-        self.adb.execute_command(&[
-            "-s", device_id,
-            "shell", "cmd", "notification", "allow_listener", service_component
-        ]).await?;
+        self.adb
+            .execute_command(&[
+                "-s",
+                device_id,
+                "shell",
+                "cmd",
+                "notification",
+                "allow_listener",
+                service_component,
+            ])
+            .await?;
 
         info!("NotificationListenerService enabled successfully");
         Ok(())
@@ -379,7 +443,9 @@ mod tests {
     #[test]
     fn test_parse_devices_output() {
         let manager = DeviceManager {
-            adb: AdbExecutor { adb_path: "adb".into() },
+            adb: AdbExecutor {
+                adb_path: "adb".into(),
+            },
             devices: RwLock::new(HashMap::new()),
         };
 
@@ -398,7 +464,9 @@ emulator-5554          device product:sdk_phone_x86_64 model:sdk_phone_x86_64 de
     #[test]
     fn test_parse_devices_offline() {
         let manager = DeviceManager {
-            adb: AdbExecutor { adb_path: "adb".into() },
+            adb: AdbExecutor {
+                adb_path: "adb".into(),
+            },
             devices: RwLock::new(HashMap::new()),
         };
 
@@ -422,7 +490,10 @@ emulator-5554          offline
             accessibility_enabled: true,
             notification_listener_enabled: true,
         };
-        assert!(status.is_ready(), "Should be ready when all permissions granted");
+        assert!(
+            status.is_ready(),
+            "Should be ready when all permissions granted"
+        );
     }
 
     /// Test is_ready() when companion app not installed
@@ -433,7 +504,10 @@ emulator-5554          offline
             accessibility_enabled: true,
             notification_listener_enabled: true,
         };
-        assert!(!status.is_ready(), "Should not be ready without companion app");
+        assert!(
+            !status.is_ready(),
+            "Should not be ready without companion app"
+        );
     }
 
     /// Test is_ready() when accessibility not enabled
@@ -444,7 +518,10 @@ emulator-5554          offline
             accessibility_enabled: false,
             notification_listener_enabled: true,
         };
-        assert!(!status.is_ready(), "Should not be ready without accessibility");
+        assert!(
+            !status.is_ready(),
+            "Should not be ready without accessibility"
+        );
     }
 
     /// Test is_ready() when notification listener not enabled
@@ -455,7 +532,10 @@ emulator-5554          offline
             accessibility_enabled: true,
             notification_listener_enabled: false,
         };
-        assert!(!status.is_ready(), "Should not be ready without notification listener");
+        assert!(
+            !status.is_ready(),
+            "Should not be ready without notification listener"
+        );
     }
 
     /// Test is_ready() when nothing is ready
@@ -466,7 +546,10 @@ emulator-5554          offline
             accessibility_enabled: false,
             notification_listener_enabled: false,
         };
-        assert!(!status.is_ready(), "Should not be ready when nothing is granted");
+        assert!(
+            !status.is_ready(),
+            "Should not be ready when nothing is granted"
+        );
     }
 
     /// Test missing_permissions_message() when all ready
@@ -567,9 +650,21 @@ emulator-5554          offline
             notification_listener_enabled: false,
         };
         let msg = status.missing_permissions_message().unwrap();
-        assert!(msg.contains("Companion app not installed"), "Should mention all: {}", msg);
-        assert!(msg.contains("AccessibilityService not enabled"), "Should mention all: {}", msg);
-        assert!(msg.contains("NotificationListenerService not enabled"), "Should mention all: {}", msg);
+        assert!(
+            msg.contains("Companion app not installed"),
+            "Should mention all: {}",
+            msg
+        );
+        assert!(
+            msg.contains("AccessibilityService not enabled"),
+            "Should mention all: {}",
+            msg
+        );
+        assert!(
+            msg.contains("NotificationListenerService not enabled"),
+            "Should mention all: {}",
+            msg
+        );
     }
 
     // ============================================================================
@@ -591,7 +686,8 @@ emulator-5554          offline
     fn test_parse_accessibility_not_enabled() {
         let output = "com.android.talkback/.TalkBackService";
         assert!(
-            !output.contains("com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService"),
+            !output
+                .contains("com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService"),
             "Should not detect accessibility service when not present"
         );
     }
@@ -602,7 +698,9 @@ emulator-5554          offline
         let outputs = vec!["null", "", "  "];
         for output in outputs {
             assert!(
-                !output.contains("com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService"),
+                !output.contains(
+                    "com.neuralbridge.companion/.service.NeuralBridgeAccessibilityService"
+                ),
                 "Should handle null/empty output: '{}'",
                 output
             );
@@ -624,7 +722,8 @@ emulator-5554          offline
     fn test_parse_notification_listener_not_enabled() {
         let output = "com.android.systemui/.notificationlistener";
         assert!(
-            !output.contains("com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"),
+            !output
+                .contains("com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"),
             "Should not detect notification listener when not present"
         );
     }
@@ -635,7 +734,9 @@ emulator-5554          offline
         let outputs = vec!["null", "", "  "];
         for output in outputs {
             assert!(
-                !output.contains("com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"),
+                !output.contains(
+                    "com.neuralbridge.companion/.service.NeuralBridgeNotificationListener"
+                ),
                 "Should handle null/empty output: '{}'",
                 output
             );

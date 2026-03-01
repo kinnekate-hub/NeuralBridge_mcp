@@ -5,11 +5,11 @@
  * health checking, and automatic reconnection.
  */
 
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::protocol::connection::DeviceConnection;
 
@@ -55,7 +55,10 @@ impl ConnectionPool {
                     debug!("Reusing existing connection for device {}", device_id);
                     return Ok(pooled.connection.clone());
                 } else {
-                    warn!("Connection for device {} is dead, removing from pool", device_id);
+                    warn!(
+                        "Connection for device {} is dead, removing from pool",
+                        device_id
+                    );
                     pool.remove(device_id);
                 }
             }
@@ -63,17 +66,21 @@ impl ConnectionPool {
 
         // No existing connection, create new one
         info!("Creating new connection for device {}", device_id);
-        let connection = DeviceConnection::connect().await
+        let connection = DeviceConnection::connect()
+            .await
             .context("Failed to establish connection")?;
 
         // Add to pool
         {
             let mut pool = self.connections.write().await;
-            pool.insert(device_id.to_string(), PooledConnection {
-                connection: connection.clone(),
-                ref_count: 1,
-                last_health_check: std::time::Instant::now(),
-            });
+            pool.insert(
+                device_id.to_string(),
+                PooledConnection {
+                    connection: connection.clone(),
+                    ref_count: 1,
+                    last_health_check: std::time::Instant::now(),
+                },
+            );
         }
 
         Ok(connection)
@@ -86,7 +93,10 @@ impl ConnectionPool {
 
         if let Some(pooled) = pool.get_mut(device_id) {
             pooled.ref_count = pooled.ref_count.saturating_sub(1);
-            debug!("Released connection for device {}, ref_count={}", device_id, pooled.ref_count);
+            debug!(
+                "Released connection for device {}, ref_count={}",
+                device_id, pooled.ref_count
+            );
         }
     }
 

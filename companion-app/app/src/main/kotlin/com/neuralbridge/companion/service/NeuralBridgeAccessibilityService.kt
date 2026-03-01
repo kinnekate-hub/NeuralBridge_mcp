@@ -6,6 +6,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
@@ -88,18 +89,17 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         // Initialize components (sets gestureEngine, uiTreeWalker, screenshotPipeline)
         initializeComponents()
 
-        // Start TCP server (sets tcpServer)
-        startTcpServer()
-
-        // Publish instance only after all lateinit vars are initialized to avoid
-        // UninitializedPropertyAccessException on early commands
+        // Publish instance before conditional startup so MainActivity can query it
         instance = this
 
         // Start foreground service
         startForegroundService()
 
-        // Request MediaProjection permission for fast screenshots
-        requestMediaProjectionPermission()
+        // Only start TCP server and request screen recording if user has enabled the toggle
+        if (isEnabled()) {
+            startTcpServer()
+            requestMediaProjectionPermission()
+        }
 
         Log.i(TAG, "NeuralBridge service fully initialized")
     }
@@ -309,9 +309,9 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         Log.i(TAG, "Service shutting down")
 
-        // Stop TCP server
+        // Stop TCP server if it was ever started
         serviceScope.launch {
-            tcpServer.stop()
+            if (::tcpServer.isInitialized) tcpServer.stop()
         }
 
         // Cancel all coroutines
@@ -393,6 +393,33 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
      */
     fun unregisterEventListener(listener: AccessibilityEventListener) {
         eventListeners.remove(listener)
+    }
+
+    /**
+     * Check if the user has enabled NeuralBridge via the master toggle
+     */
+    private fun isEnabled(): Boolean {
+        return getSharedPreferences("neuralbridge_prefs", Context.MODE_PRIVATE)
+            .getBoolean("nb_enabled", false)
+    }
+
+    /**
+     * Start TCP server and request MediaProjection — called when user turns on the master toggle
+     */
+    fun enable() {
+        if (!::tcpServer.isInitialized) {
+            startTcpServer()
+        }
+        requestMediaProjectionPermission()
+    }
+
+    /**
+     * Stop TCP server — called when user turns off the master toggle
+     */
+    fun disable() {
+        serviceScope.launch {
+            if (::tcpServer.isInitialized) tcpServer.stop()
+        }
     }
 
     /**

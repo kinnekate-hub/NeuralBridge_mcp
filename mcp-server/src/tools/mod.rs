@@ -9,7 +9,7 @@
  * - wait: Synchronization primitives
  */
 
-pub mod observe;
 pub mod act;
 pub mod manage;
+pub mod observe;
 pub mod wait;

@@ -14,10 +14,10 @@
  * 7. Fuzzy text match (Levenshtein distance < 3)
  */
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use tracing::{debug, trace};
 
-use crate::protocol::pb::{UiElement, Selector};
+use crate::protocol::pb::{Selector, UiElement};
 
 /// Element resolver with intelligent matching
 #[allow(dead_code)]
@@ -43,8 +43,10 @@ impl ElementResolver {
     /// Vector of matching UiElement objects, prioritized by match quality
     #[allow(dead_code)]
     pub fn resolve(&self, selector: &Selector, find_all: bool) -> Result<Vec<UiElement>> {
-        debug!("Resolving selector: text={:?}, id={:?}, class={:?}",
-            selector.text, selector.resource_id, selector.class_name);
+        debug!(
+            "Resolving selector: text={:?}, id={:?}, class={:?}",
+            selector.text, selector.resource_id, selector.class_name
+        );
 
         let mut matches = Vec::new();
 
@@ -67,7 +69,9 @@ impl ElementResolver {
         // Strategy 3: Text matching
         if !selector.text.is_empty() {
             for element in &self.elements {
-                if let Some(score) = self.match_text(&element.text, &selector.text, selector.exact_match) {
+                if let Some(score) =
+                    self.match_text(&element.text, &selector.text, selector.exact_match)
+                {
                     matches.push((score, element.clone()));
                 }
             }
@@ -115,7 +119,11 @@ impl ElementResolver {
         if selector.index >= 0 {
             let index = selector.index as usize;
             if index >= result.len() {
-                bail!("Index {} out of range (only {} matches)", index, result.len());
+                bail!(
+                    "Index {} out of range (only {} matches)",
+                    index,
+                    result.len()
+                );
             }
             result = vec![result[index].clone()];
         } else if !find_all {
@@ -186,7 +194,9 @@ impl ElementResolver {
             return false;
         }
 
-        content_desc.to_lowercase().contains(&selector_desc.to_lowercase())
+        content_desc
+            .to_lowercase()
+            .contains(&selector_desc.to_lowercase())
     }
 
     /// Match class name (suffix match)
@@ -226,7 +236,11 @@ impl ElementResolver {
 
         for i in 1..=len1 {
             for j in 1..=len2 {
-                let cost = if s1_chars[i - 1] == s2_chars[j - 1] { 0 } else { 1 };
+                let cost = if s1_chars[i - 1] == s2_chars[j - 1] {
+                    0
+                } else {
+                    1
+                };
                 matrix[i][j] = std::cmp::min(
                     std::cmp::min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1),
                     matrix[i - 1][j - 1] + cost,
@@ -241,11 +255,12 @@ impl ElementResolver {
     #[allow(dead_code)]
     pub fn element_at_point(&self, x: i32, y: i32) -> Option<UiElement> {
         // Find all elements containing point
-        let mut candidates: Vec<&UiElement> = self.elements.iter()
+        let mut candidates: Vec<&UiElement> = self
+            .elements
+            .iter()
             .filter(|e| {
                 if let Some(bounds) = &e.bounds {
-                    x >= bounds.left && x <= bounds.right &&
-                    y >= bounds.top && y <= bounds.bottom
+                    x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom
                 } else {
                     false
                 }
@@ -269,7 +284,10 @@ mod tests {
 
     #[test]
     fn test_levenshtein_distance() {
-        assert_eq!(ElementResolver::levenshtein_distance("kitten", "sitting"), 3);
+        assert_eq!(
+            ElementResolver::levenshtein_distance("kitten", "sitting"),
+            3
+        );
         assert_eq!(ElementResolver::levenshtein_distance("hello", "hello"), 0);
         assert_eq!(ElementResolver::levenshtein_distance("", "test"), 4);
     }
@@ -292,7 +310,10 @@ mod tests {
         assert_eq!(resolver.match_text("Login", "login", true), None);
 
         // Partial match
-        assert_eq!(resolver.match_text("Click to Login", "login", false), Some(85));
+        assert_eq!(
+            resolver.match_text("Click to Login", "login", false),
+            Some(85)
+        );
 
         // Case-insensitive exact
         assert_eq!(resolver.match_text("Login", "login", false), Some(95));
