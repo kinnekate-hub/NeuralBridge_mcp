@@ -83,7 +83,7 @@
   <circle cx="608" cy="239" r="8" fill="#F59E0B"/>
   <text x="608" y="243" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="700">A</text>
   <text x="625" y="241" fill="#B45309" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="600">AccessibilityService</text>
-  <text x="625" y="257" fill="#92400E" font-family="system-ui, -apple-system, sans-serif" font-size="10">UI tree &middot; Gestures &middot; Events</text>
+  <text x="625" y="257" fill="#92400E" font-family="system-ui, -apple-system, sans-serif" font-size="10">UI tree &#xB7; Gestures &#xB7; Events</text>
   <text x="625" y="271" fill="#92400E" font-family="system-ui, -apple-system, sans-serif" font-size="10">In-process, zero IPC</text>
 
   <rect x="590" y="286" width="240" height="46" rx="6" fill="#FDF2F8"/>
