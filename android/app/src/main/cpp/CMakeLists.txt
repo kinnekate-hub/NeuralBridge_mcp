@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Build flags for optimization
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
-# TODO: Re-enable -Werror after implementing all JNI functions
+# Note: -Werror disabled until libjpeg-turbo is integrated
 
 # Enable NEON on ARM (hardware-accelerated SIMD)
 if(${ANDROID_ABI} STREQUAL "arm64-v8a")
@@ -25,7 +25,7 @@ add_library(neuralbridge_jni SHARED
     jpeg_encoder.cpp
 )
 
-# TODO: Add libjpeg-turbo
+# libjpeg-turbo (not yet integrated)
 # Option 1: Prebuilt library
 # set(JPEG_TURBO_DIR ${CMAKE_SOURCE_DIR}/../../../../libjpeg-turbo)
 # add_library(jpeg-turbo SHARED IMPORTED)
@@ -55,7 +55,7 @@ target_link_libraries(neuralbridge_jni
     ${log-lib}
     ${jnigraphics-lib}
     ${android-lib}
-    # jpeg-turbo  # TODO: Uncomment after libjpeg-turbo integration
+    # jpeg-turbo  # Enable after libjpeg-turbo integration
 )
 
 # Include directories

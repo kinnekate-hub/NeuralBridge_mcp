@@ -78,11 +78,6 @@ class InputEngine(
         // Strategy 2: Fallback to clipboard paste (for long text OR if ACTION_SET_TEXT failed)
         Log.w(TAG, "ACTION_SET_TEXT failed, falling back to clipboard paste")
         return inputViaClipboard(element, text, append)
-
-        // TODO: Strategy 3: IME injection
-        // - Focus element
-        // - Inject key events character by character
-        // - This is slower but works for all apps
     }
 
     /**

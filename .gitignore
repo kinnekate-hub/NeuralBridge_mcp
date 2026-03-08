@@ -148,6 +148,7 @@ CLAUDE.md
 # Demo & Test Outputs
 # ------------------------------------------
 screenshots/
+!docs/screenshots/
 recordings/*.mp4
 test-results/
 **/test_results.txt

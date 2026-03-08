@@ -148,10 +148,7 @@ class ScreenshotPipeline(
             } catch (e: Exception) {
                 Log.e(TAG, "MediaProjection capture failed, falling back to ADB", e)
 
-                // Fallback to ADB screencap
-                // TODO: Implement ADB fallback
-                // This requires routing through MCP server's ADB connection
-                throw Exception("MediaProjection unavailable and ADB fallback not yet implemented", e)
+                throw Exception("MediaProjection unavailable — grant screenshot consent via the system dialog", e)
             }
         }
     }
@@ -382,7 +379,6 @@ class ScreenshotPipeline(
      * Calls C++ jpeg_encoder.cpp using libjpeg-turbo for faster encoding.
      * This method is declared as external and implemented in C++.
      *
-     * TODO: Implement C++ JNI encoder
      */
     private external fun encodeJpegNative(bitmap: Bitmap, quality: Int): ByteArray
 

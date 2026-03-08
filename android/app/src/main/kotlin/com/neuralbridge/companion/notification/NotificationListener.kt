@@ -80,8 +80,6 @@ class NotificationListener : NotificationListenerService() {
         if (sbn == null) return
 
         Log.d(TAG, "Notification removed: ${sbn.packageName}")
-
-        // TODO: Push notification removal event if needed
     }
 
     /**

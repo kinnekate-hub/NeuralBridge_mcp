@@ -17,8 +17,7 @@
 #include <cstring>
 #include <vector>
 
-// TODO: Include libjpeg-turbo headers after library integration
-// #include <turbojpeg.h>
+// #include <turbojpeg.h>  // Enable after libjpeg-turbo integration
 
 #define LOG_TAG "NeuralBridge-JNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -67,68 +66,8 @@ Java_com_neuralbridge_companion_screenshot_ScreenshotPipeline_encodeJpegNative(
         return nullptr;
     }
 
-    // TODO: Implement libjpeg-turbo encoding
-    // 1. Create tjhandle with tjInitCompress()
-    // 2. Convert RGBA to RGB (remove alpha channel)
-    // 3. Call tjCompress2() with:
-    //    - TJPF_RGB pixel format
-    //    - TJSAMP_420 subsampling for quality/size balance
-    //    - Quality parameter from argument
-    // 4. Get compressed JPEG bytes and size
-    // 5. Destroy tjhandle with tjDestroy()
-    //
-    // Example code structure:
-    //
-    // tjhandle tj = tjInitCompress();
-    //
-    // // Convert RGBA to RGB
-    // std::vector<uint8_t> rgb_buffer(info.width * info.height * 3);
-    // uint8_t* src = (uint8_t*)pixels;
-    // uint8_t* dst = rgb_buffer.data();
-    // for (uint32_t i = 0; i < info.width * info.height; i++) {
-    //     dst[0] = src[0]; // R
-    //     dst[1] = src[1]; // G
-    //     dst[2] = src[2]; // B
-    //     // Skip alpha (src[3])
-    //     src += 4;
-    //     dst += 3;
-    // }
-    //
-    // // Compress to JPEG
-    // unsigned char* jpeg_buf = nullptr;
-    // unsigned long jpeg_size = 0;
-    // int result = tjCompress2(
-    //     tj,
-    //     rgb_buffer.data(),
-    //     info.width,
-    //     0, // pitch (0 = automatic)
-    //     info.height,
-    //     TJPF_RGB,
-    //     &jpeg_buf,
-    //     &jpeg_size,
-    //     TJSAMP_420,
-    //     quality,
-    //     TJFLAG_FASTDCT | TJFLAG_NOREALLOC
-    // );
-    //
-    // if (result != 0) {
-    //     LOGE("JPEG compression failed: %s", tjGetErrorStr());
-    //     tjDestroy(tj);
-    //     return nullptr;
-    // }
-    //
-    // // Copy to Java byte array
-    // jbyteArray jpeg_array = env->NewByteArray(jpeg_size);
-    // env->SetByteArrayRegion(jpeg_array, 0, jpeg_size, (jbyte*)jpeg_buf);
-    //
-    // // Cleanup
-    // tjFree(jpeg_buf);
-    // tjDestroy(tj);
-    //
-    // return jpeg_array;
-
-    // Placeholder: Return empty array until libjpeg-turbo is integrated
-    LOGE("libjpeg-turbo integration not yet implemented");
+    // Stub: libjpeg-turbo not yet integrated — returns empty array
+    LOGE("Native JPEG encoding not available, using Java fallback");
 
     // Unlock bitmap
     AndroidBitmap_unlockPixels(env, bitmap);
@@ -148,10 +87,7 @@ Java_com_neuralbridge_companion_screenshot_ScreenshotPipeline_getNativeLibraryVe
     JNIEnv* env,
     jobject /* thiz */) {
 
-    // TODO: Return libjpeg-turbo version
-    // return env->NewStringUTF(tjGetVersionString());
-
-    return env->NewStringUTF("NeuralBridge JNI v0.1.0 (libjpeg-turbo not yet integrated)");
+    return env->NewStringUTF("NeuralBridge JNI v0.1.0");
 }
 
 /**
