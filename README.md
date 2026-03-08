@@ -68,84 +68,23 @@ NeuralBridge takes a different approach: an on-device AccessibilityService that 
 
 NeuralBridge is a two-tier system. Your AI agent speaks MCP over HTTP directly to the companion app — no middleware required.
 
-```
-              YOUR MACHINE                                       ANDROID DEVICE
-  ┌──────────────────┐                              ┌──────────────────────────────────┐
-  │                  │                              │                                  │
-  │    AI  Agent     │   MCP over HTTP (port 7474)  │    NeuralBridge Companion App    │
-  │                  │ ◄──────────────────────────► │                                  │
-  │  Claude Code     │  Tool calls &                │  ┌──────────────────────────┐   │
-  │  Cursor IDE      │  responses                   │  │ MCP HTTP Server          │   │
-  │  Custom Agent    │                              │  │ (Ktor CIO, port 7474)    │   │
-  │                  │                              │  ├──────────────────────────┤   │
-  │  "tap the        │                              │  │ Tool Registry (32 tools) │   │
-  │   login button"  │                              │  ├──────────────────────────┤   │
-  │                  │                              │  │ AccessibilityService     │   │
-  │  "screenshot     │                              │  │  • UI tree walking       │   │
-  │   the screen"    │                              │  │  • Gesture injection     │   │
-  │                  │                              │  │  • Event callbacks       │   │
-  │  "type hello"    │                              │  ├──────────────────────────┤   │
-  │                  │                              │  │ Screenshot Pipeline      │   │
-  └──────────────────┘                              │  │  MediaProjection →       │   │
-                                                    │  │  libjpeg-turbo (JNI)    │   │
-                                                    │  └──────────────────────────┘   │
-                                                    │          Kotlin + C++            │
-                                                    └──────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/diagrams/architecture.svg" alt="NeuralBridge Architecture" width="800" />
+</p>
 
 ### Data Flow: What happens when you say "tap Login"
 
-```
-  Step 1                Step 2               Step 3
-  Agent sends           Companion App        Response
-  MCP tool call         resolves & executes  flows back
-
-  ┌─────────┐          ┌──────────────┐      ┌─────────┐
-  │  Agent   │  ──►    │  Companion   │ ──►  │  Agent  │
-  │          │         │     App      │      │         │
-  │ tap(text │  HTTP   │              │ HTTP │ "tapped │
-  │ ="Login")│  <5ms   │ "Login" →   │ <1ms │  at     │
-  │          │         │ (540, 820)  │      │(540,820)│
-  └─────────┘          │ dispatchGesture     └─────────┘
-                       │ at (540,820) │
-                       └──────────────┘
-                              │
-                              ▼  <50ms
-                       ┌──────────────┐
-                       │  Android OS  │
-                       │  processes   │
-                       │  the tap     │
-                       └──────────────┘
-
-  Total end-to-end: ~60ms (vs ~1500ms with Appium)
-```
+<p align="center">
+  <img src="docs/diagrams/data-flow.svg" alt="Data Flow — tap Login" width="800" />
+</p>
 
 ### The Two Command Paths
 
 Not all operations are equal. NeuralBridge intelligently routes commands through the fastest available path:
 
-```
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │                         MCP TOOL CALL                              │
-  └───────────────────────────┬─────────────────────────────────────────┘
-                              │
-              ┌───────────────┴───────────────┐
-              ▼                               ▼
-  ┌─────────────────────┐        ┌─────────────────────┐
-  │   FAST PATH (<10ms) │        │  SLOW PATH (200ms+) │
-  │   AccessibilityService       │  ADB Shell           │
-  │                     │        │                      │
-  │  • tap, swipe, pinch│        │  • close_app (force) │
-  │  • input_text       │        │  • list_apps         │
-  │  • get_ui_tree      │        │  • set_clipboard     │
-  │  • find_elements    │        │                      │
-  │  • screenshot       │        │                      │
-  │  • press_key        │        │                      │
-  │  • global actions   │        │  Requires ADB conn.  │
-  │                     │        │                      │
-  │  95% of operations  │        │  5% of operations    │
-  └─────────────────────┘        └─────────────────────┘
-```
+<p align="center">
+  <img src="docs/diagrams/command-paths.svg" alt="Fast Path vs Slow Path" width="800" />
+</p>
 
 ---
 
@@ -357,19 +296,9 @@ Every tool is callable by your AI agent through MCP. Tools accept **selectors** 
 
 Most tools accept selectors instead of raw coordinates. The Semantic Engine resolves selectors through a priority chain:
 
-```
-  Agent says: tap(text="Login")
-
-  Semantic Engine tries (in order):
-    1. Exact text match        →  "Login" == "Login"         ✓ Found!
-    2. Partial text match      →  "Login" in "Login Now"
-    3. Content description     →  contentDesc == "Login"
-    4. Resource ID (suffix)    →  id ends with "login_button"
-    5. Combined (AND logic)    →  text="Login" AND class="Button"
-    6. Fuzzy match             →  Levenshtein("Login", "Logn") < 3
-
-  Multiple matches? Prefer: visible → interactive → center-positioned
-```
+<p align="center">
+  <img src="docs/diagrams/selector-system.svg" alt="Selector Resolution Chain" width="800" />
+</p>
 
 ---
 
@@ -402,67 +331,15 @@ All NeuralBridge measurements taken on a Pixel-class device over WiFi HTTP. Comp
 
 ### Why So Fast?
 
-```
-  Appium (slowest — 5 hops):
-
-    Agent → HTTP → Appium Server → ADB → UIAutomator2 → Device
-                                                              │
-    Agent ← HTTP ← Appium Server ← ADB ← result ◄───────────┘
-
-    Each hop adds latency. Process spawning alone costs 100-200ms.
-
-
-  Maestro (reliable but slow — 3 hops + settle):
-
-    Agent → gRPC → On-device server → [750ms settle] → UIAutomator → Device
-                                                                         │
-    Agent ← gRPC ← On-device server ← result ◄──────────────────────────┘
-
-    Cuts out HTTP + ADB, but adds 750ms mandatory settle wait per action.
-    Designed for flake-free testing, not raw speed.
-
-
-  mobile-mcp / ADB Shell (ADB-bound):
-
-    Agent → MCP stdio → ADB → spawn process → UIAutomator → Device
-                                                                 │
-    Agent ← MCP stdio ← ADB ← result ◄──────────────────────────┘
-
-    Every action spawns a new shell process on the device.
-
-
-  droidrun (on-device app, but ADB transport):
-
-    Agent → ADB forward → TCP → Portal App (AccessibilityService)
-                                        │
-    Agent ← ADB forward ← TCP ◄────────┘
-
-    Has an in-process engine, but ADB forwarding adds 200-500ms overhead.
-
-
-  NeuralBridge (fastest — 1 hop):
-
-    Agent → HTTP → Companion App (in-process AccessibilityService)
-                          │
-    Agent ← HTTP ◄────────┘
-
-    No process spawning. No ADB. No UIAutomator IPC. No intermediate server.
-    AccessibilityService runs IN the same process as the Android UI framework.
-    It's like the difference between a phone call and a note on your own desk.
-```
+<p align="center">
+  <img src="docs/diagrams/why-fast.svg" alt="Architecture Comparison — Why NeuralBridge is Faster" width="800" />
+</p>
 
 ### Screenshot Pipeline
 
-```
-  ┌─────────────────┐     ┌───────────────────┐     ┌─────────────────┐     ┌──────────┐
-  │ MediaProjection  │────►│ ImageReader        │────►│ libjpeg-turbo   │────►│ TCP Send │
-  │ (Android API)    │     │ (hardware buffer)  │     │ (C++ via JNI)   │     │          │
-  └─────────────────┘     └───────────────────┘     └─────────────────┘     └──────────┘
-       <30ms                   zero-copy                 <20ms                  <10ms
-
-  Total: ~60ms for a full 1080p JPEG screenshot
-  Full quality (80): ~50KB  │  Thumbnail (40): ~20KB
-```
+<p align="center">
+  <img src="docs/diagrams/screenshot-pipeline.svg" alt="Screenshot Pipeline" width="800" />
+</p>
 
 ---
 
