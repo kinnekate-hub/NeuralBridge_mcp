@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NeuralBridge — 100x Faster Android Automation for AI Agents</title>
+  <meta name="description" content="Open-source Android companion app giving AI agents sub-10ms device control. 32 tools. No root. Apache 2.0.">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0a0e17; --surface: #111827; --border: #1e293b;
+      --accent: #06b6d4; --accent2: #8b5cf6; --green: #10b981;
+      --text: #e2e8f0; --muted: #94a3b8; --white: #ffffff;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+
+    /* Nav */
+    nav { padding: 20px 0; border-bottom: 1px solid var(--border); }
+    nav .container { display: flex; justify-content: space-between; align-items: center; }
+    .logo { font-size: 1.4rem; font-weight: 700; color: var(--white); }
+    .logo span { color: var(--accent); }
+    .nav-links { display: flex; gap: 24px; align-items: center; }
+    .nav-links a { color: var(--muted); font-size: 0.9rem; }
+    .btn { display: inline-block; padding: 10px 24px; border-radius: 8px; font-weight: 600; font-size: 0.95rem; transition: all 0.2s; }
+    .btn-primary { background: var(--accent); color: var(--bg); }
+    .btn-primary:hover { background: #22d3ee; text-decoration: none; }
+    .btn-outline { border: 1px solid var(--border); color: var(--text); }
+    .btn-outline:hover { border-color: var(--accent); text-decoration: none; }
+
+    /* Hero */
+    .hero { padding: 100px 0 80px; text-align: center; }
+    .badge { display: inline-block; padding: 6px 16px; border-radius: 20px; background: rgba(6,182,212,0.1); border: 1px solid rgba(6,182,212,0.3); color: var(--accent); font-size: 0.85rem; font-weight: 500; margin-bottom: 24px; }
+    h1 { font-size: 3.5rem; font-weight: 800; line-height: 1.1; color: var(--white); max-width: 800px; margin: 0 auto 24px; }
+    h1 .highlight { background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .hero p { font-size: 1.25rem; color: var(--muted); max-width: 600px; margin: 0 auto 40px; }
+    .hero-buttons { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+
+    /* Stats */
+    .stats { padding: 60px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 32px; text-align: center; }
+    .stat-value { font-size: 2.5rem; font-weight: 800; color: var(--white); }
+    .stat-value span { color: var(--accent); }
+    .stat-label { font-size: 0.9rem; color: var(--muted); margin-top: 4px; }
+
+    /* Code block */
+    .arch { padding: 80px 0; text-align: center; }
+    .arch h2 { font-size: 2rem; color: var(--white); margin-bottom: 12px; }
+    .arch p { color: var(--muted); margin-bottom: 40px; max-width: 600px; margin-left: auto; margin-right: auto; }
+    .code-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; max-width: 900px; margin: 0 auto; }
+    .code-box { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; text-align: left; }
+    .code-box .label { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 16px; }
+    .code-box .label.old { color: #ef4444; }
+    .code-box .label.new { color: var(--green); }
+    .code-box code { font-family: 'SF Mono', Consolas, monospace; font-size: 0.85rem; color: var(--muted); line-height: 1.8; }
+    .code-box code .accent { color: var(--accent); }
+
+    /* Benchmarks */
+    .benchmarks { padding: 80px 0; }
+    .benchmarks h2 { font-size: 2rem; color: var(--white); text-align: center; margin-bottom: 12px; }
+    .benchmarks > .container > p { color: var(--muted); text-align: center; margin-bottom: 48px; }
+    table { width: 100%; border-collapse: collapse; background: var(--surface); border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
+    th { background: rgba(6,182,212,0.08); padding: 14px 20px; text-align: left; font-size: 0.85rem; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
+    td { padding: 14px 20px; border-bottom: 1px solid var(--border); font-size: 0.95rem; }
+    tr:last-child td { border-bottom: none; font-weight: 700; }
+    .fast { color: var(--green); font-weight: 700; }
+
+    /* Features */
+    .features { padding: 80px 0; }
+    .features h2 { font-size: 2rem; color: var(--white); text-align: center; margin-bottom: 48px; }
+    .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+    .feature-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 32px; }
+    .feature-icon { font-size: 2rem; margin-bottom: 16px; }
+    .feature-card h3 { color: var(--white); font-size: 1.15rem; margin-bottom: 8px; }
+    .feature-card p { color: var(--muted); font-size: 0.9rem; }
+
+    /* Setup */
+    .setup { padding: 80px 0; text-align: center; }
+    .setup h2 { font-size: 2rem; color: var(--white); margin-bottom: 12px; }
+    .setup > .container > p { color: var(--muted); margin-bottom: 40px; }
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; max-width: 900px; margin: 0 auto 40px; }
+    .step { text-align: center; }
+    .step-num { width: 40px; height: 40px; border-radius: 50%; background: rgba(6,182,212,0.15); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; font-weight: 700; margin-bottom: 12px; }
+    .step p { font-size: 0.9rem; color: var(--muted); }
+    .config-box { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; max-width: 500px; margin: 0 auto; text-align: left; }
+    .config-box code { font-family: 'SF Mono', Consolas, monospace; font-size: 0.85rem; color: var(--muted); line-height: 1.8; }
+
+    /* CTA */
+    .cta { padding: 100px 0; text-align: center; background: linear-gradient(180deg, transparent, rgba(6,182,212,0.05)); }
+    .cta h2 { font-size: 2.5rem; color: var(--white); margin-bottom: 16px; }
+    .cta p { color: var(--muted); font-size: 1.1rem; margin-bottom: 32px; }
+
+    /* Footer */
+    footer { padding: 40px 0; border-top: 1px solid var(--border); text-align: center; color: var(--muted); font-size: 0.85rem; }
+
+    @media (max-width: 768px) {
+      h1 { font-size: 2.2rem; }
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      .code-compare, .features-grid { grid-template-columns: 1fr; }
+      .steps { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container">
+      <div class="logo">🧠 Neural<span>Bridge</span></div>
+      <div class="nav-links">
+        <a href="#benchmarks">Benchmarks</a>
+        <a href="#features">Features</a>
+        <a href="#setup">Setup</a>
+        <a href="https://github.com/dondetir/NeuralBridge_mcp" class="btn btn-outline">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="container">
+      <div class="badge">⚡ Open Source · Apache 2.0 · No Root Required</div>
+      <h1><span class="highlight">100x Faster</span> Android Automation for AI Agents</h1>
+      <p>Give Claude, GPT, Gemini, or any AI agent sub-10ms control over Android. One HTTP call. No middleware.</p>
+      <div class="hero-buttons">
+        <a href="https://github.com/dondetir/NeuralBridge_mcp" class="btn btn-primary">📦 Get the Code</a>
+        <a href="https://github.com/dondetir/NeuralBridge_mcp/blob/main/docs/PERFORMANCE.md" class="btn btn-outline">📊 View Benchmarks</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="stats">
+    <div class="container">
+      <div class="stats-grid">
+        <div><div class="stat-value"><span>~2</span>ms</div><div class="stat-label">Tap Latency</div></div>
+        <div><div class="stat-value"><span>100</span>x</div><div class="stat-label">Faster Than Conventional</div></div>
+        <div><div class="stat-value"><span>32</span></div><div class="stat-label">AI-Native Tools</div></div>
+        <div><div class="stat-value"><span>73</span>%</div><div class="stat-label">Fewer Tokens</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="arch">
+    <div class="container">
+      <h2>One Hop Instead of Five</h2>
+      <p>Conventional tools route through middleware, ADB, and serialization layers. NeuralBridge puts the server inside the app.</p>
+      <div class="code-compare">
+        <div class="code-box">
+          <div class="label old">❌ Conventional (300–1000ms)</div>
+          <code>Agent<br>→ HTTP Request<br>→ Middleware Server<br>→ ADB Bridge<br>→ UIAutomator2<br>→ Device</code>
+        </div>
+        <div class="code-box">
+          <div class="label new">✅ NeuralBridge (~2ms)</div>
+          <code>Agent<br>→ HTTP<br>→ <span class="accent">NeuralBridge App</span><br>&nbsp;&nbsp;&nbsp;(in-process execution)</code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="benchmarks" id="benchmarks">
+    <div class="container">
+      <h2>The Numbers</h2>
+      <p>Measured on Pixel 7, Android 14, WiFi. 100 runs per operation.</p>
+      <table>
+        <thead>
+          <tr><th>Operation</th><th>NeuralBridge</th><th>Others (Typical)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Tap</td><td class="fast">~2ms</td><td>300–1000ms</td></tr>
+          <tr><td>Swipe</td><td class="fast">~2ms</td><td>300–1000ms</td></tr>
+          <tr><td>Text Input</td><td class="fast">~1.4ms</td><td>500–3000ms</td></tr>
+          <tr><td>UI Tree</td><td class="fast">18–33ms</td><td>500ms–5s</td></tr>
+          <tr><td>Screenshot</td><td class="fast">~60ms</td><td>300–500ms</td></tr>
+          <tr><td>Average</td><td class="fast">~6.4ms</td><td>~800ms–1.5s</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="features" id="features">
+    <div class="container">
+      <h2>Built for AI, Not Adapted for AI</h2>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">🎯</div>
+          <h3>Semantic Selectors</h3>
+          <p>Say tap(text="Login") — not pixel coordinates. 6-step resolution chain with fuzzy matching.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">💰</div>
+          <h3>Token-Optimized</h3>
+          <p>73% fewer tokens for UI trees. Compact format, interactive-only filtering, smart omission.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">👁️</div>
+          <h3>Context-Rich</h3>
+          <p>Screenshot + semantic UI tree in one ~70ms call. Complete situational awareness.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔍</div>
+          <h3>Smart Scrolling</h3>
+          <p>scroll_to_element finds elements automatically. No guessing scroll counts.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">♿</div>
+          <h3>Accessibility Audit</h3>
+          <p>Check touch targets, content descriptions, and contrast in under 50ms.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📱</div>
+          <h3>Android 7–15+</h3>
+          <p>Nine major versions. Automatic fallbacks for version-specific restrictions.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="setup" id="setup">
+    <div class="container">
+      <h2>Up and Running in 60 Seconds</h2>
+      <p>No root. No middleware server. No ADB forwarding.</p>
+      <div class="steps">
+        <div class="step"><div class="step-num">1</div><p>Install the companion APK</p></div>
+        <div class="step"><div class="step-num">2</div><p>Enable AccessibilityService</p></div>
+        <div class="step"><div class="step-num">3</div><p>Grant screen capture</p></div>
+        <div class="step"><div class="step-num">4</div><p>Point your agent</p></div>
+      </div>
+      <div class="config-box">
+        <code>{<br>&nbsp;&nbsp;"mcpServers": {<br>&nbsp;&nbsp;&nbsp;&nbsp;"neuralbridge": {<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"type": "http",<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"url": "http://&lt;device-ip&gt;:7474/mcp"<br>&nbsp;&nbsp;&nbsp;&nbsp;}<br>&nbsp;&nbsp;}<br>}</code>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta">
+    <div class="container">
+      <h2>Your AI Agent Deserves Better Infrastructure</h2>
+      <p>32 tools. Sub-10ms latency. Open source.</p>
+      <div class="hero-buttons">
+        <a href="https://github.com/dondetir/NeuralBridge_mcp" class="btn btn-primary">🚀 Get Started on GitHub</a>
+        <a href="https://github.com/dondetir/NeuralBridge_mcp/issues" class="btn btn-outline">💬 Open an Issue</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <p>NeuralBridge is open source under Apache 2.0 · Built by <a href="https://hackernoon.com/u/rdondeti">rdondeti</a></p>
+    </div>
+  </footer>
+</body>
+</html>
