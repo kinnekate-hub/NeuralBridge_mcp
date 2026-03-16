@@ -74,8 +74,8 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
     // MCP HTTP server
     private var mcpHttpServer: McpHttpServer? = null
 
-    // Event listener for UI changes
-    private val eventListeners = mutableListOf<AccessibilityEventListener>()
+    // Event listener for UI changes (CopyOnWriteArrayList for thread-safe iteration from onAccessibilityEvent)
+    private val eventListeners = java.util.concurrent.CopyOnWriteArrayList<AccessibilityEventListener>()
 
     // Event streaming state
     private val eventsEnabled = AtomicBoolean(false)
@@ -131,6 +131,12 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         uiTreeWalker = UiTreeWalker(this)
         screenshotPipeline = ScreenshotPipeline(this, serviceScope)
 
+        // Update notification when MediaProjection session is lost by the system
+        screenshotPipeline.onMediaProjectionLost = {
+            Log.w(TAG, "MediaProjection session lost - falling back to AccessibilityService screenshots")
+            updateNotificationForSlowScreenshots()
+        }
+
         Log.d(TAG, "Core components initialized")
     }
 
@@ -184,7 +190,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
      * Request MediaProjection permission for fast screenshot capture
      *
      * This is called on service startup to pre-request permission so that
-     * screenshots use the fast path (60ms) instead of ADB fallback (200ms).
+     * screenshots use the fast path (60ms) instead of AccessibilityService fallback (~200-400ms).
      *
      * On Android 14+, this permission is single-use and expires when the
      * app process is killed or device restarts.
@@ -206,7 +212,7 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
                 Log.i(TAG, "MediaProjection permission granted - fast screenshots enabled")
                 updateNotificationForFastScreenshots()
             } else {
-                Log.w(TAG, "MediaProjection permission denied - using ADB fallback for screenshots")
+                Log.w(TAG, "MediaProjection permission denied - will use AccessibilityService.takeScreenshot() fallback on API 30+")
             }
         }
     }
@@ -230,6 +236,19 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
                 updateNotificationForFastScreenshots()
             }
         }
+    }
+
+    /**
+     * Update notification when MediaProjection is lost (user can tap to re-enable)
+     */
+    private fun updateNotificationForSlowScreenshots() {
+        val notification = buildNotification(
+            title = getString(R.string.foreground_service_title),
+            message = "Fast screenshots disabled \u2014 tap to re-enable"
+        )
+
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
     /**
@@ -340,9 +359,18 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
         // Release screen wake lock synchronously before scope cancellation
         mcpHttpServer?.releaseScreenWakeLock()
 
-        // Stop MCP HTTP server if it was started
-        serviceScope.launch {
-            mcpHttpServer?.stop()
+        // Clean up screenshot pipeline synchronously (releases VirtualDisplay, ImageReader, MediaProjection)
+        if (::screenshotPipeline.isInitialized) {
+            screenshotPipeline.cleanup()
+        }
+
+        // Stop MCP HTTP server synchronously to release port 7474
+        runBlocking(Dispatchers.IO) {
+            try {
+                mcpHttpServer?.stop()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping MCP HTTP server", e)
+            }
         }
 
         // Cancel all coroutines
@@ -447,6 +475,11 @@ class NeuralBridgeAccessibilityService : AccessibilityService() {
      * Stop MCP server and remove notification — called when user turns off the master toggle
      */
     fun disable() {
+        // Clean up screenshot pipeline synchronously (releases VirtualDisplay, ImageReader, MediaProjection)
+        if (::screenshotPipeline.isInitialized) {
+            screenshotPipeline.cleanup()
+        }
+
         @Suppress("DEPRECATION")
         stopForeground(true)
         mcpHttpServer?.releaseScreenWakeLock()

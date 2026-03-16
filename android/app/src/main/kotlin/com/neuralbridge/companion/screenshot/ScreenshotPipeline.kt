@@ -9,17 +9,23 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
+import android.view.Display
 import android.view.WindowManager
+import androidx.annotation.RequiresApi
 import com.neuralbridge.companion.service.ScreenshotQuality
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -27,8 +33,8 @@ import kotlin.coroutines.resumeWithException
 /**
  * Screenshot Pipeline
  *
- * Captures screenshots using MediaProjection → VirtualDisplay → ImageReader.
- * Falls back to ADB screencap if MediaProjection is unavailable.
+ * Captures screenshots using MediaProjection -> VirtualDisplay -> ImageReader.
+ * Falls back to AccessibilityService.takeScreenshot() (API 30+) if MediaProjection is unavailable.
  *
  * Performance target: <60ms for 1080p JPEG encoding
  * - Capture: <30ms
@@ -46,28 +52,44 @@ class ScreenshotPipeline(
     companion object {
         private const val TAG = "ScreenshotPipeline"
         private const val VIRTUAL_DISPLAY_NAME = "NeuralBridge-Screenshot"
+        private const val IMAGE_READER_TIMEOUT_MS = 5000L
     }
 
     private val captureMutex = Mutex()
 
-    // MediaProjection components
+    // MediaProjection components — @Volatile for visibility across callback/capture threads
+    @Volatile
     private var mediaProjection: MediaProjection? = null
+    @Volatile
     private var virtualDisplay: VirtualDisplay? = null
+    @Volatile
     private var imageReader: ImageReader? = null
 
-    // Screen dimensions
-    private val displayMetrics: DisplayMetrics by lazy {
+    // Listener notified when MediaProjection session dies
+    var onMediaProjectionLost: (() -> Unit)? = null
+
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            Log.w(TAG, "MediaProjection session stopped by system")
+            releaseProjectionResources()
+            onMediaProjectionLost?.invoke()
+        }
+    }
+
+    /**
+     * Read current display metrics fresh each time.
+     * Avoids stale dimensions after device rotation.
+     */
+    private fun getDisplayMetrics(): DisplayMetrics {
         val windowManager = accessibilityService.getSystemService(WindowManager::class.java)
-        DisplayMetrics().apply {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                // Use new API for Android 11+ (API 30+)
+        return DisplayMetrics().apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val metrics = windowManager.currentWindowMetrics
                 val bounds = metrics.bounds
                 widthPixels = bounds.width()
                 heightPixels = bounds.height()
                 densityDpi = accessibilityService.resources.displayMetrics.densityDpi
             } else {
-                // Use deprecated API for Android 7-10 (API 24-29)
                 @Suppress("DEPRECATION")
                 windowManager.defaultDisplay.getRealMetrics(this)
             }
@@ -97,7 +119,9 @@ class ScreenshotPipeline(
         if (resultCode != Activity.RESULT_OK || resultData == null) return false
         return try {
             val manager = accessibilityService.getSystemService(MediaProjectionManager::class.java)
-            mediaProjection = manager.getMediaProjection(resultCode, resultData)
+            val projection = manager.getMediaProjection(resultCode, resultData)
+            registerCallback(projection)
+            mediaProjection = projection
             Log.i(TAG, "MediaProjection permission granted from pending consent")
             true
         } catch (e: Exception) {
@@ -115,6 +139,7 @@ class ScreenshotPipeline(
     suspend fun requestMediaProjectionPermission(): Boolean {
         return try {
             val projection = initializeMediaProjection()
+            registerCallback(projection)
             mediaProjection = projection
             Log.i(TAG, "MediaProjection permission granted")
             true
@@ -122,6 +147,14 @@ class ScreenshotPipeline(
             Log.w(TAG, "MediaProjection permission denied: ${e.message}")
             false
         }
+    }
+
+    /**
+     * Register MediaProjection.Callback for session death detection.
+     * On Android 14+ (API 34), this is MANDATORY before createVirtualDisplay().
+     */
+    private fun registerCallback(projection: MediaProjection) {
+        projection.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
     }
 
     /**
@@ -138,17 +171,45 @@ class ScreenshotPipeline(
                 // Try MediaProjection path first
                 val bitmap = captureViaMediaProjection()
 
-                // Encode to JPEG
-                val jpegBytes = encodeToJpeg(bitmap, quality)
-
-                val elapsedMs = System.currentTimeMillis() - startTime
-                Log.i(TAG, "Screenshot captured: ${jpegBytes.size} bytes in ${elapsedMs}ms")
-
-                jpegBytes
+                try {
+                    val jpegBytes = encodeToJpeg(bitmap, quality)
+                    val elapsedMs = System.currentTimeMillis() - startTime
+                    Log.i(TAG, "Screenshot captured: ${jpegBytes.size} bytes in ${elapsedMs}ms")
+                    jpegBytes
+                } finally {
+                    bitmap.recycle()
+                }
             } catch (e: Exception) {
-                Log.e(TAG, "MediaProjection capture failed, falling back to ADB", e)
+                Log.w(TAG, "MediaProjection capture failed, trying AccessibilityService fallback", e)
 
-                throw Exception("MediaProjection unavailable — grant screenshot consent via the system dialog", e)
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    throw Exception(
+                        "Screenshot failed: MediaProjection unavailable and device is below " +
+                        "Android 11 (API 30) so AccessibilityService fallback is not available. " +
+                        "Grant screenshot consent via the system dialog.",
+                        e
+                    )
+                }
+
+                try {
+                    val bitmap = captureViaAccessibilityService()
+                    try {
+                        val jpegBytes = encodeToJpeg(bitmap, quality)
+                        val elapsedMs = System.currentTimeMillis() - startTime
+                        Log.i(TAG, "Screenshot captured via AccessibilityService fallback: ${jpegBytes.size} bytes in ${elapsedMs}ms")
+                        jpegBytes
+                    } finally {
+                        bitmap.recycle()
+                    }
+                } catch (fallbackError: Exception) {
+                    Log.e(TAG, "AccessibilityService fallback also failed", fallbackError)
+                    throw Exception(
+                        "Screenshot failed: MediaProjection unavailable and AccessibilityService " +
+                        "fallback failed. Grant screenshot consent via the system dialog, or " +
+                        "ensure Android 11+ for fallback.",
+                        fallbackError
+                    )
+                }
             }
         }
     }
@@ -159,46 +220,56 @@ class ScreenshotPipeline(
     private suspend fun captureViaMediaProjection(): Bitmap = withContext(Dispatchers.IO) {
         // Step 1: Check if MediaProjection is already initialized (from previous manual approval)
         // Do NOT try to initialize if not available - it would launch consent dialog
-        if (mediaProjection == null) {
-            throw SecurityException("MediaProjection not initialized. Manual user consent required.")
-        }
+        val projection = mediaProjection
+            ?: throw SecurityException("MediaProjection not initialized. Manual user consent required.")
 
         // Step 2: Create VirtualDisplay if not already created
         if (virtualDisplay == null || imageReader == null) {
-            virtualDisplay = createVirtualDisplay(mediaProjection!!)
+            virtualDisplay = createVirtualDisplay(projection)
         }
 
-        // Step 3: Wait for next image from ImageReader
-        val image = suspendCancellableCoroutine<android.media.Image> { continuation ->
-            val reader = imageReader ?: run {
-                continuation.resumeWithException(IllegalStateException("ImageReader is null"))
-                return@suspendCancellableCoroutine
-            }
+        // Capture local reference so projectionCallback.onStop() can't null it mid-capture
+        val reader = imageReader
+            ?: throw IllegalStateException("ImageReader is null after createVirtualDisplay")
 
-            // Drain stale images from previous capture to prevent buffer overflow
-            var stale = reader.acquireLatestImage()
-            while (stale != null) {
-                stale.close()
-                stale = reader.acquireLatestImage()
-            }
+        // Step 3: Wait for next image from ImageReader (with timeout to prevent deadlock)
+        val image = try { withTimeout(IMAGE_READER_TIMEOUT_MS) {
+            suspendCancellableCoroutine<android.media.Image> { continuation ->
+                // Use local reader reference — safe from concurrent nullification by projectionCallback
 
-            reader.setOnImageAvailableListener({ ir ->
-                // Remove listener FIRST — prevents double-fire if a second frame arrives
-                // before the coroutine resumes and unregisters it
-                ir.setOnImageAvailableListener(null, null)
-                val img = ir.acquireLatestImage()
-                if (img != null) {
-                    continuation.resume(img)
-                } else {
-                    continuation.resumeWithException(
-                        IllegalStateException("acquireLatestImage returned null")
-                    )
+                // Drain stale images from previous capture to prevent buffer overflow
+                var stale = reader.acquireLatestImage()
+                while (stale != null) {
+                    stale.close()
+                    stale = reader.acquireLatestImage()
                 }
-            }, android.os.Handler(android.os.Looper.getMainLooper()))
 
-            continuation.invokeOnCancellation {
-                reader.setOnImageAvailableListener(null, null)
+                reader.setOnImageAvailableListener({ ir ->
+                    // Remove listener FIRST — prevents double-fire if a second frame arrives
+                    // before the coroutine resumes and unregisters it
+                    ir.setOnImageAvailableListener(null, null)
+                    val img = ir.acquireLatestImage()
+                    if (img != null) {
+                        continuation.resume(img)
+                    } else {
+                        continuation.resumeWithException(
+                            IllegalStateException("acquireLatestImage returned null")
+                        )
+                    }
+                }, Handler(Looper.getMainLooper()))
+
+                continuation.invokeOnCancellation {
+                    reader.setOnImageAvailableListener(null, null)
+                }
             }
+        } } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            // Tear down stale VirtualDisplay/ImageReader so next capture recreates them fresh
+            Log.w(TAG, "ImageReader timed out after ${IMAGE_READER_TIMEOUT_MS}ms — tearing down pipeline")
+            virtualDisplay?.release()
+            virtualDisplay = null
+            imageReader?.close()
+            imageReader = null
+            throw e
         }
 
         try {
@@ -209,6 +280,66 @@ class ScreenshotPipeline(
         } catch (e: Exception) {
             image.close()
             throw e
+        }
+    }
+
+    /**
+     * Capture screenshot via AccessibilityService.takeScreenshot() (API 30+ fallback)
+     *
+     * Slower than MediaProjection (~200-400ms) but requires no user consent beyond
+     * the accessibility service permission that is already granted.
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
+    private suspend fun captureViaAccessibilityService(): Bitmap = withContext(Dispatchers.Main) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            throw UnsupportedOperationException(
+                "AccessibilityService.takeScreenshot() requires Android 11+ (API 30)"
+            )
+        }
+
+        suspendCancellableCoroutine { continuation ->
+            accessibilityService.takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                accessibilityService.mainExecutor,
+                object : AccessibilityService.TakeScreenshotCallback {
+                    override fun onSuccess(screenshotResult: AccessibilityService.ScreenshotResult) {
+                        try {
+                            val hardwareBitmap = Bitmap.wrapHardwareBuffer(
+                                screenshotResult.hardwareBuffer,
+                                screenshotResult.colorSpace
+                            )
+                            screenshotResult.hardwareBuffer.close()
+                            if (hardwareBitmap == null) {
+                                continuation.resumeWithException(
+                                    IllegalStateException("wrapHardwareBuffer returned null")
+                                )
+                                return
+                            }
+                            // Copy to software bitmap for JPEG encoding
+                            val softwareBitmap = try {
+                                hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                            } finally {
+                                hardwareBitmap.recycle()
+                            }
+                            if (softwareBitmap == null) {
+                                continuation.resumeWithException(
+                                    IllegalStateException("Failed to copy hardware bitmap to software bitmap")
+                                )
+                                return
+                            }
+                            continuation.resume(softwareBitmap)
+                        } catch (e: Exception) {
+                            continuation.resumeWithException(e)
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        continuation.resumeWithException(
+                            RuntimeException("AccessibilityService.takeScreenshot failed with error code: $errorCode")
+                        )
+                    }
+                }
+            )
         }
     }
 
@@ -231,11 +362,13 @@ class ScreenshotPipeline(
 
         bitmap.copyPixelsFromBuffer(buffer)
 
-        // Crop if there's row padding
+        // Crop if there's row padding (recycle the oversized intermediate bitmap)
         return if (rowPadding == 0) {
             bitmap
         } else {
-            Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
+            val cropped = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
+            bitmap.recycle()
+            cropped
         }
     }
 
@@ -251,7 +384,7 @@ class ScreenshotPipeline(
             accessibilityService.startActivity(intent)
 
             // Step 2: Poll for consent result (since we can't directly await Activity result from Service)
-            scope.launch(Dispatchers.IO) {
+            val pollJob = scope.launch(Dispatchers.IO) {
                 var attempts = 0
                 val maxAttempts = 100 // 10 seconds timeout (100 * 100ms)
 
@@ -301,9 +434,10 @@ class ScreenshotPipeline(
                 continuation.resumeWithException(error)
             }
 
-            // Handle cancellation
+            // Cancel polling if the coroutine is cancelled
             continuation.invokeOnCancellation {
                 Log.d(TAG, "MediaProjection initialization cancelled")
+                pollJob.cancel()
             }
         }
     }
@@ -312,9 +446,10 @@ class ScreenshotPipeline(
      * Create virtual display for screenshot capture
      */
     private fun createVirtualDisplay(mediaProjection: MediaProjection): VirtualDisplay {
-        val width = displayMetrics.widthPixels
-        val height = displayMetrics.heightPixels
-        val densityDpi = displayMetrics.densityDpi
+        val metrics = getDisplayMetrics()
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+        val densityDpi = metrics.densityDpi
 
         // Create ImageReader
         val reader = ImageReader.newInstance(
@@ -395,7 +530,23 @@ class ScreenshotPipeline(
     }
 
     /**
-     * Clean up resources
+     * Release MediaProjection resources (VirtualDisplay, ImageReader) without stopping projection.
+     * Called from the MediaProjection.Callback when the system kills the session.
+     */
+    private fun releaseProjectionResources() {
+        virtualDisplay?.release()
+        virtualDisplay = null
+
+        imageReader?.close()
+        imageReader = null
+
+        mediaProjection = null
+
+        Log.d(TAG, "MediaProjection resources released (session lost)")
+    }
+
+    /**
+     * Clean up all resources. Call synchronously from service onDestroy/disable.
      */
     fun cleanup() {
         virtualDisplay?.release()
@@ -410,4 +561,3 @@ class ScreenshotPipeline(
         Log.d(TAG, "Screenshot pipeline cleaned up")
     }
 }
-

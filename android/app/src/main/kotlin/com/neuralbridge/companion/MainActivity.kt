@@ -287,7 +287,7 @@ class MainActivity : Activity() {
 
         val screenshotReady = service?.hasMediaProjectionPermission() ?: false
         screenshotStatusBar.setBackgroundColor(getColor(if (screenshotReady) R.color.status_active else R.color.status_inactive))
-        screenshotStatusText.text = if (screenshotReady) "FAST" else "ADB"
+        screenshotStatusText.text = if (screenshotReady) "FAST" else "SLOW"
         screenshotStatusText.setTextColor(getColor(if (screenshotReady) R.color.success else R.color.warning))
     }
 

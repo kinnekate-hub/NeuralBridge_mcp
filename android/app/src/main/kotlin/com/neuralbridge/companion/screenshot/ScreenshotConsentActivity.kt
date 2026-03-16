@@ -120,4 +120,11 @@ class ScreenshotConsentActivity : Activity() {
         // Close this Activity
         finish()
     }
+
+    override fun onDestroy() {
+        // Reset the gate so future consent requests are not permanently blocked
+        // if this activity is killed before onActivityResult fires
+        isConsentInProgress.set(false)
+        super.onDestroy()
+    }
 }
