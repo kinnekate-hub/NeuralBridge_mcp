@@ -1,37 +1,43 @@
 package com.neuralbridge
 
+import android.content.Context
 import ai.nexa.core.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-class NexaBridge {
-    private var engine: NexaEngine? = null
+class NexaBridge(private val context: Context) {
+    private var vlm: VlmWrapper? = null
 
-    // FUNCTION 1: Load the AI Model into the Pixel 8 NPU
     suspend fun initializeAI(modelPath: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            engine = NexaEngine()
-            engine?.loadModel(modelPath)
-            return@withContext true
+            // Official Initialization
+            NexaSdk.getInstance().init(context)
+
+            // Official wrapper, but locked to "cpu" to bypass Snapdragon requirement
+            VlmWrapper.builder()
+                .vlmCreateInput(VlmCreateInput(
+                    model_name = "omni-neural",
+                    model_path = modelPath,
+                    plugin_id = "cpu", 
+                    config = ModelConfig()
+                ))
+                .build()
+                .onSuccess { wrapper ->
+                    vlm = wrapper
+                }
+            
+            return@withContext vlm != null
         } catch (e: Exception) {
             return@withContext false
         }
     }
 
-    // FUNCTION 2: Send a Prompt and Get a Response
-    suspend fun chatWithAI(userPrompt: String): String = withContext(Dispatchers.IO) {
-        if (engine == null) return@withContext "SYSTEM: AI Engine is offline."
-        
-        return@withContext try {
-            engine?.generate(userPrompt) ?: "SYSTEM: No response generated."
-        } catch (e: Exception) {
-            "SYSTEM: Generation failed."
+    suspend fun chatWithAI(userPrompt: String) {
+        if (vlm == null) return
+        withContext(Dispatchers.IO) {
+            vlm?.generateStreamFlow(userPrompt, GenerationConfig())?.collect { chunk ->
+                println(chunk) 
+            }
         }
-    }
-
-    // FUNCTION 3: Unload the AI to protect phone battery and memory
-    fun shutdownAI() {
-        engine?.close()
-        engine = null
     }
 }
