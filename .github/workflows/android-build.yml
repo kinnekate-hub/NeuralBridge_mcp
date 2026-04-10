@@ -18,14 +18,20 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    - name: Make Gradle Executable
-      run: chmod +x ./gradlew
-
-    - name: Build the APK
-      run: ./gradlew assembleDebug --stacktrace
+    - name: Find and Run Gradle
+      run: |
+        # Automatically hunt down the gradlew script no matter what folder it is in
+        GRADLE_DIR=$(dirname $(find . -name "gradlew" | head -n 1))
+        echo "Found gradlew inside: $GRADLE_DIR"
+        cd $GRADLE_DIR
+        
+        # Unlock and build the app
+        chmod +x ./gradlew
+        ./gradlew assembleDebug --stacktrace
 
     - name: Upload the Finished APK
       uses: actions/upload-artifact@v4
       with:
         name: app-release-apk
-        path: app/build/outputs/apk/debug/app-debug.apk
+        # The wildcard catches the APK regardless of folder depth
+        path: '**/*.apk'
