@@ -9,29 +9,27 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout the Code
+    - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Set up Java 17
+    - name: Setup Java
       uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
 
-    - name: Find and Run Gradle
-      run: |
-        # Automatically hunt down the gradlew script no matter what folder it is in
-        GRADLE_DIR=$(dirname $(find . -name "gradlew" | head -n 1))
-        echo "Found gradlew inside: $GRADLE_DIR"
-        cd $GRADLE_DIR
-        
-        # Unlock and build the app
-        chmod +x ./gradlew
-        ./gradlew assembleDebug --stacktrace
+    - name: Setup Fresh Gradle Engine
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.7'
 
-    - name: Upload the Finished APK
+    - name: Build APK (Bypassing Wrapper)
+      run: |
+        cd android
+        gradle assembleDebug --stacktrace
+
+    - name: Upload Finished APK
       uses: actions/upload-artifact@v4
       with:
         name: app-release-apk
-        # The wildcard catches the APK regardless of folder depth
         path: '**/*.apk'
