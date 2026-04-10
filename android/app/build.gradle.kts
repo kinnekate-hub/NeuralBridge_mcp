@@ -9,6 +9,9 @@ android {
     packagingOptions {
         jniLibs.useLegacyPackaging = true
     }
+    packagingOptions {
+        jniLibs.useLegacyPackaging = true
+    }
     namespace = "com.neuralbridge.companion"
     compileSdk = 34
 
@@ -81,6 +84,7 @@ android {
 }
 
 dependencies {
+    implementation("ai.nexa:core:0.0.24")
     implementation("ai.nexa:core:0.0.24")
     // Kotlin (updated for Kotlin 2.0.21 compatibility)
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.0.21")
